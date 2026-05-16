@@ -1,0 +1,60 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Includes">
+      <UniqueIdentifier>{2f7e7914-f72b-44e2-bd47-81175dc69e88}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Frontend">
+      <UniqueIdentifier>{92e951bc-8fa3-4a79-8e7f-febf697a250e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Backend">
+      <UniqueIdentifier>{dcc70571-b161-4006-857d-45ca867e63e0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Backend">
+      <UniqueIdentifier>{e470c025-73e3-45f0-a076-eaaed4235765}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Frontend">
+      <UniqueIdentifier>{85b8b87b-af32-4fff-a40b-dee20b4565e0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\raylib.h">
+      <Filter>Includes</Filter>
+    </ClInclude>
+    <ClInclude Include="include\raymath.h">
+      <Filter>Includes</Filter>
+    </ClInclude>
+    <ClInclude Include="include\rlgl.h">
+      <Filter>Includes</Filter>
+    </ClInclude>
+    <ClInclude Include="src\BottomLayer.h">
+      <Filter>Header Files\Backend</Filter>
+    </ClInclude>
+    <ClInclude Include="ConnectForm.h">
+      <Filter>Header Files\Frontend</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Game.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\BottomLayer.cpp">
+      <Filter>Source Files\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ConnectForm.cpp">
+      <Filter>Source Files\Frontend</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

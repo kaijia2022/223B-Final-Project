@@ -5,6 +5,7 @@
 #pragma pack(push, 1)
 
 enum class PacketType : uint8_t {
+    CONNECT = 0,
     CLIENT_INPUT = 1,
     GAME_STATE = 2
 };
@@ -29,6 +30,11 @@ struct CoinState {
     float x;
     float y;
     bool active;
+};
+
+// SERVER -> CLIENT: The absolute, authoritative state of the world
+struct ReadyToStartPacket {
+    PacketType type = PacketType::CONNECT;
 };
 
 // SERVER -> CLIENT: The absolute, authoritative state of the world

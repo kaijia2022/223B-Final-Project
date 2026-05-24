@@ -29,6 +29,11 @@ int main() {
     if (role == NetworkRole::HOST) bottomLayer.HostGame(8080);
     else bottomLayer.ConnectToGame(targetIp, 8080);
 
+    if (role == NetworkRole::CLIENT) {
+        ReadyToStartPacket readyConnect;
+        std::string outData(reinterpret_cast<char*>(&readyConnect), sizeof(ReadyToStartPacket));
+        bottomLayer.SendNetworkData(outData);
+    }
     
 
     GameStatePacket authoritativeState = {};
@@ -52,6 +57,15 @@ int main() {
     }
 
     TopLayer::DrawGame(authoritativeState, myLocalPlayerId);
+
+    while (role == NetworkRole::HOST) {
+        std::string msg = bottomLayer.GetNextNetworkMessage(); //needs to block until receives
+        size_t offset = 0;
+        PacketType type = static_cast<PacketType>(msg[offset]);
+        if (type == PacketType::CLIENT_INPUT && offset + sizeof(GameStatePacket) <= msg.size()) {
+            break;
+        }
+    }
 
     // MAIN GAME LOOP
     while (!WindowShouldClose()) {

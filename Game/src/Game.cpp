@@ -65,7 +65,7 @@ int main() {
         PacketType type = static_cast<PacketType>(msg[offset]);
         if (type == PacketType::CLIENT_INPUT && offset + sizeof(GameStatePacket) <= msg.size()) {
             if (role == NetworkRole::HOST) {
-                ReadyToStartPacket readyConnect;
+                ReadyToStartPacket readyConnect{};
                 std::string outData(reinterpret_cast<char*>(&readyConnect), sizeof(ReadyToStartPacket));
                 bottomLayer.SendNetworkData(outData);
                 printf("Host sent ready to connect packet\n");

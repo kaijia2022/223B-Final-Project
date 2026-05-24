@@ -99,9 +99,14 @@ bool BottomLayer::HasIncomingData() {
 std::string BottomLayer::GetNextNetworkMessage() {
     std::unique_lock<std::mutex> lock(queueMutex);
 
-    cv.wait(lock, [this]{
-        return !incomingDataQueue.empty();
-    });
+    while (incomingDataQueue.empty()) {
+        printf("Waiting for data\n");
+        cv.wait(lock, [this] {
+            return !incomingDataQueue.empty();
+         });
+    }
+
+    printf("Woke up and returning data\n");
     std::string msg = incomingDataQueue.front();
     incomingDataQueue.pop();
     return msg;

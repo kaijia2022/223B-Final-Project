@@ -58,11 +58,18 @@ int main() {
 
     TopLayer::DrawGame(authoritativeState, myLocalPlayerId);
 
-    while (role == NetworkRole::HOST) {
+    while (true) {
         std::string msg = bottomLayer.GetNextNetworkMessage(); //needs to block until receives
+        printf("Received connect message\n");
         size_t offset = 0;
         PacketType type = static_cast<PacketType>(msg[offset]);
         if (type == PacketType::CLIENT_INPUT && offset + sizeof(GameStatePacket) <= msg.size()) {
+            if (role == NetworkRole::HOST) {
+                ReadyToStartPacket readyConnect;
+                std::string outData(reinterpret_cast<char*>(&readyConnect), sizeof(ReadyToStartPacket));
+                bottomLayer.SendNetworkData(outData);
+                printf("Host sent ready to connect packet\n");
+            }
             break;
         }
     }
@@ -85,11 +92,11 @@ int main() {
         //sends input
         std::string outData(reinterpret_cast<char*>(&localInput), sizeof(ClientInputPacket));
         bottomLayer.SendNetworkData(outData);
-
+        printf("Sent input to opponent\n");
         //receive input from opposing player
         std::string msg = bottomLayer.GetNextNetworkMessage(); //needs to block until receives
         size_t offset = 0;
-
+        printf("Received input from opponent\n");
         // Always apply host's input first
         ClientInputPacket* remoteInput = reinterpret_cast<ClientInputPacket*>(msg.data());
         PacketType type = static_cast<PacketType>(msg[offset]);

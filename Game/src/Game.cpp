@@ -30,7 +30,7 @@ int main() {
     else bottomLayer.ConnectToGame(targetIp, 8080);
 
     if (role == NetworkRole::CLIENT) {
-        ReadyToStartPacket readyConnect;
+        ReadyToStartPacket readyConnect{};
         std::string outData(reinterpret_cast<char*>(&readyConnect), sizeof(ReadyToStartPacket));
         bottomLayer.SendNetworkData(outData);
     }

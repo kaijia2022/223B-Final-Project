@@ -45,6 +45,7 @@ private:
     // Thread-safe message queue for the game loop
     std::queue<std::string> incomingDataQueue;
     std::mutex queueMutex;
+    std::condition_variable cv;
 
     // Background thread so TCP waiting doesn't freeze the game
     std::thread networkThread;  

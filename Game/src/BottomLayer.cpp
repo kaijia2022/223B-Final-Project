@@ -1,5 +1,7 @@
 #include "BottomLayer.h"
 #include <iostream>
+#include <condition_variable>
+#include <thread>
 
 // Include Winsock
 #define WIN32_LEAN_AND_MEAN
@@ -95,11 +97,11 @@ bool BottomLayer::HasIncomingData() {
 }
 
 std::string BottomLayer::GetNextNetworkMessage() {
-    std::lock_guard<std::mutex> lock(queueMutex);
-    while (incomingDataQueue.empty()) {
-        continue;
-    }
+    std::unique_lock<std::mutex> lock(queueMutex);
 
+    cv.wait(lock, [this]{
+        return !incomingDataQueue.empty();
+    });
     std::string msg = incomingDataQueue.front();
     incomingDataQueue.pop();
     return msg;
@@ -117,6 +119,7 @@ void BottomLayer::NetworkWorkerLoop() {
 
             std::lock_guard<std::mutex> lock(queueMutex);
             incomingDataQueue.push(rawData);
+            cv.notify_one();
         }
         else if (bytesReceived == 0 || bytesReceived == SOCKET_ERROR) {
             std::cout << "Connection closed by peer.\n";

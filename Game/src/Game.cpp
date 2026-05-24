@@ -71,99 +71,51 @@ int main() {
         bottomLayer.SendNetworkData(outData);
 
         //receive input from opposing player
-        std::string msg = bottomLayer.GetNextNetworkMessage();
+        std::string msg = bottomLayer.GetNextNetworkMessage(); //needs to block until receives
         size_t offset = 0;
 
-        ClientInputPacket remoteInput = (ClientInputPacket) msg;
+        // Always apply host's input first
+        ClientInputPacket* remoteInput = reinterpret_cast<ClientInputPacket*>(msg.data());
         PacketType type = static_cast<PacketType>(msg[offset]);
         if (type == PacketType::CLIENT_INPUT && offset + sizeof(GameStatePacket) <= msg.size()) {
-
+            if (remoteInput->playerId == 0) { //if opponent is host
+                authoritativeState.players[0].x += remoteInput->moveX * moveSpeed;
+                authoritativeState.players[0].y += remoteInput->moveY * moveSpeed;
+            }
+            else {
+                authoritativeState.players[0].x += localInput.moveX * moveSpeed;
+                authoritativeState.players[0].y += localInput.moveY * moveSpeed;
+            }
         }
-        else {
+        else { //might not need this because TCP
             //request most recent input if it's not client_input
             break;
         }
 
-   
-
-        // ==========================================================
-        // SERVER (HOST) LOGIC
-        // ==========================================================
-            
-
-            // Apply Host's local input immediately
-            authoritativeState.players[0].x += localInput.moveX * moveSpeed;
-            authoritativeState.players[0].y += localInput.moveY * moveSpeed;
-
-            // Process Client Inputs from Network Queue
-            while (bottomLayer.HasIncomingData()) {
-                std::string msg = bottomLayer.GetNextNetworkMessage();
-                size_t offset = 0;
-
-                // Parse potentially merged TCP packets
-                while (offset < msg.size()) {
-                    PacketType type = static_cast<PacketType>(msg[offset]);
-                    if (type == PacketType::CLIENT_INPUT && offset + sizeof(ClientInputPacket) <= msg.size()) {
-                        ClientInputPacket clientInput;
-                        memcpy(&clientInput, msg.data() + offset, sizeof(ClientInputPacket));
-
-                        // Apply client movement
-                        authoritativeState.players[clientInput.playerId].x += clientInput.moveX * moveSpeed;
-                        authoritativeState.players[clientInput.playerId].y += clientInput.moveY * moveSpeed;
-
-                        offset += sizeof(ClientInputPacket);
-                    }
-                    else {
-                        break;
-                    }
-                }
-
-            // Boundary Checks & Collision for ALL players
-            for (int pId = 0; pId < 2; pId++) {
-                PlayerState& p = authoritativeState.players[pId];
-                if (p.x < 65.0f) p.x = 65.0f;  if (p.x > 735.0f) p.x = 735.0f;
-                if (p.y < 65.0f) p.y = 65.0f;  if (p.y > 485.0f) p.y = 485.0f;
-
-                for (int cId = 0; cId < MAX_COINS; cId++) {
-                    if (authoritativeState.coins[cId].active &&
-                        CheckPlayerCoinCollision(p.x, p.y, authoritativeState.coins[cId].x, authoritativeState.coins[cId].y)) {
-
-                        p.score += 10;
-                        authoritativeState.coins[cId].active = false;
-                        authoritativeState.coins[cId].x = (float)GetRandomValue(100, 700);
-                        authoritativeState.coins[cId].y = (float)GetRandomValue(100, 450);
-                        authoritativeState.coins[cId].active = true;
-                    }
-                }
-            }
-
-            // Broadcast Authoritative State to Client
-            std::string outData(reinterpret_cast<char*>(&authoritativeState), sizeof(GameStatePacket));
-            bottomLayer.SendNetworkData(outData);
+        if (remoteInput->playerId == 1) { //if opponent is client
+            authoritativeState.players[1].x += remoteInput->moveX * moveSpeed;
+            authoritativeState.players[1].y += remoteInput->moveY * moveSpeed;
+        }
+        else {
+            authoritativeState.players[1].x += localInput.moveX * moveSpeed;
+            authoritativeState.players[1].y += localInput.moveY * moveSpeed;
         }
 
-        // ==========================================================
-        // CLIENT LOGIC
-        // ==========================================================
-        else if (role == NetworkRole::CLIENT) {
-            // Send our input to the Host
-            std::string outData(reinterpret_cast<char*>(&localInput), sizeof(ClientInputPacket));
-            bottomLayer.SendNetworkData(outData);
+        // Boundary Checks & Collision for ALL players
+        for (int pId = 0; pId < 2; pId++) {
+            PlayerState& p = authoritativeState.players[pId];
+            if (p.x < 65.0f) p.x = 65.0f;  if (p.x > 735.0f) p.x = 735.0f;
+            if (p.y < 65.0f) p.y = 65.0f;  if (p.y > 485.0f) p.y = 485.0f;
 
-            // Overwrite local world with Host's World State
-            while (bottomLayer.HasIncomingData()) {
-                std::string msg = bottomLayer.GetNextNetworkMessage();
-                size_t offset = 0;
+            for (int cId = 0; cId < MAX_COINS; cId++) {
+                if (authoritativeState.coins[cId].active &&
+                    CheckPlayerCoinCollision(p.x, p.y, authoritativeState.coins[cId].x, authoritativeState.coins[cId].y)) {
 
-                while (offset < msg.size()) {
-                    PacketType type = static_cast<PacketType>(msg[offset]);
-                    if (type == PacketType::GAME_STATE && offset + sizeof(GameStatePacket) <= msg.size()) {
-                        memcpy(&authoritativeState, msg.data() + offset, sizeof(GameStatePacket));
-                        offset += sizeof(GameStatePacket);
-                    }
-                    else {
-                        break;
-                    }
+                    p.score += 10;
+                    authoritativeState.coins[cId].active = false;
+                    authoritativeState.coins[cId].x = (float)GetRandomValue(100, 700);
+                    authoritativeState.coins[cId].y = (float)GetRandomValue(100, 450);
+                    authoritativeState.coins[cId].active = true;
                 }
             }
         }

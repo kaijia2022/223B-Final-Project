@@ -4,133 +4,150 @@
 #include "TopLayer.h"
 #include "BottomLayer.h"
 #include <string>
-#include <cmath>
 
-// Simple collision helper: Distance between player center and coin center
 bool CheckPlayerCoinCollision(float px, float py, float cx, float cy) {
     float distanceSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
-    // Player radius (~15px) + Coin radius (10px) = 25px. 25 * 25 = 625
     return distanceSq < 625.0f;
 }
 
 int main() {
-    // Upgraded to 800x600 so the TopLayer HUD and Arena fit perfectly
     InitWindow(800, 600, "Gold Rush - Multiplayer Ready");
     SetTargetFPS(60);
 
     std::string targetIp = "";
     NetworkRole role = NetworkRole::NONE;
 
-    // 1. Show the UI and block until the user makes a choice
     RunConnectionScreen(targetIp, role);
-
     if (role == NetworkRole::NONE) {
         CloseWindow();
         return 0;
     }
 
-    // --- MULTIPLAYER SETUP (Commented out for single-player testing) ---
-    // uint32_t myLocalPlayerId = (role == NetworkRole::HOST) ? 0 : 1; 
-    // if (role == NetworkRole::HOST) bottomLayer.HostGame(8080);
-    // else bottomLayer.ConnectToGame(targetIp, 8080);
+    BottomLayer bottomLayer;
+    uint32_t myLocalPlayerId = (role == NetworkRole::HOST) ? 0 : 1;
 
-    uint32_t myLocalPlayerId = 0; // Hardcoded local ID for single player setup
+    if (role == NetworkRole::HOST) bottomLayer.HostGame(8080);
+    else bottomLayer.ConnectToGame(targetIp, 8080);
 
-    // 2. Initialize World State Structure (Middle Layer Data)
     GameStatePacket authoritativeState = {};
     authoritativeState.frameNumber = 0;
 
-    // Setup Local Player (Slot 0)
-    authoritativeState.players[0].id = 0;
-    authoritativeState.players[0].x = 400.0f; // Center of arena
-    authoritativeState.players[0].y = 250.0f;
-    authoritativeState.players[0].score = 0;
-    authoritativeState.players[0].colorId = 0; // Red
-    authoritativeState.players[0].active = true;
+    // HOST ONLY: Initialize World Data
+    if (role == NetworkRole::HOST) {
+        authoritativeState.players[0] = { 0, 200.0f, 250.0f, 0, 0, true }; // Host (Red)
+        authoritativeState.players[1] = { 1, 600.0f, 250.0f, 0, 1, true }; // Client (Blue)
 
-    // Explicitly deactivate other player slots for now
-    for (int i = 1; i < MAX_PLAYERS; i++) {
-        authoritativeState.players[i].active = false;
-    }
+        for (int i = 2; i < MAX_PLAYERS; i++) authoritativeState.players[i].active = false;
 
-    // Spawn 5 initial coins inside the arena boundaries (50 to 750 X, 50 to 500 Y)
-    float mockCoinPositionsX[5] = { 150, 300, 600, 200, 550 };
-    float mockCoinPositionsY[5] = { 120, 400, 200, 350, 420 };
-    for (int i = 0; i < MAX_COINS; i++) {
-        if (i < 5) {
-            authoritativeState.coins[i].id = i;
-            authoritativeState.coins[i].x = mockCoinPositionsX[i];
-            authoritativeState.coins[i].y = mockCoinPositionsY[i];
-            authoritativeState.coins[i].active = true;
-        }
-        else {
-            authoritativeState.coins[i].active = false;
+        float mockCoinPositionsX[5] = { 150, 300, 600, 200, 550 };
+        float mockCoinPositionsY[5] = { 120, 400, 200, 350, 420 };
+        for (int i = 0; i < MAX_COINS; i++) {
+            if (i < 5) {
+                authoritativeState.coins[i] = { (uint32_t)i, mockCoinPositionsX[i], mockCoinPositionsY[i], true };
+            }
+            else {
+                authoritativeState.coins[i].active = false;
+            }
         }
     }
 
-    // 3. Main Game Loop
+    // MAIN GAME LOOP
     while (!WindowShouldClose()) {
-        authoritativeState.frameNumber++;
+        float moveSpeed = 4.0f;
 
-        // ==========================================================
-        // STEP A: INPUT GATHERING (Bottom Layer)
-        // ==========================================================
-        ClientInputPacket localInput = {};
-        localInput.playerId = myLocalPlayerId;
-
+        // 1. GATHER LOCAL INPUT
+        ClientInputPacket localInput = { PacketType::CLIENT_INPUT, myLocalPlayerId, 0.0f, 0.0f };
         if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) localInput.moveX = 1.0f;
         if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))  localInput.moveX = -1.0f;
         if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))  localInput.moveY = 1.0f;
         if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))    localInput.moveY = -1.0f;
 
-        // [FUTURE NETWORK HOOK - CLIENT]: 
-        // If (role == CLIENT), send(localInput) to server and skip STEP B.
-        // Instead, read incoming data via recv() to overwrite authoritativeState.
+        // ==========================================================
+        // SERVER (HOST) LOGIC
+        // ==========================================================
+        if (role == NetworkRole::HOST) {
+            authoritativeState.frameNumber++;
+
+            // Apply Host's local input immediately
+            authoritativeState.players[0].x += localInput.moveX * moveSpeed;
+            authoritativeState.players[0].y += localInput.moveY * moveSpeed;
+
+            // Process Client Inputs from Network Queue
+            while (bottomLayer.HasIncomingData()) {
+                std::string msg = bottomLayer.GetNextNetworkMessage();
+                size_t offset = 0;
+
+                // Parse potentially merged TCP packets
+                while (offset < msg.size()) {
+                    PacketType type = static_cast<PacketType>(msg[offset]);
+                    if (type == PacketType::CLIENT_INPUT && offset + sizeof(ClientInputPacket) <= msg.size()) {
+                        ClientInputPacket clientInput;
+                        memcpy(&clientInput, msg.data() + offset, sizeof(ClientInputPacket));
+
+                        // Apply client movement
+                        authoritativeState.players[clientInput.playerId].x += clientInput.moveX * moveSpeed;
+                        authoritativeState.players[clientInput.playerId].y += clientInput.moveY * moveSpeed;
+
+                        offset += sizeof(ClientInputPacket);
+                    }
+                    else {
+                        break;
+                    }
+                }
+            }
+
+            // Boundary Checks & Collision for ALL players
+            for (int pId = 0; pId < 2; pId++) {
+                PlayerState& p = authoritativeState.players[pId];
+                if (p.x < 65.0f) p.x = 65.0f;  if (p.x > 735.0f) p.x = 735.0f;
+                if (p.y < 65.0f) p.y = 65.0f;  if (p.y > 485.0f) p.y = 485.0f;
+
+                for (int cId = 0; cId < MAX_COINS; cId++) {
+                    if (authoritativeState.coins[cId].active &&
+                        CheckPlayerCoinCollision(p.x, p.y, authoritativeState.coins[cId].x, authoritativeState.coins[cId].y)) {
+
+                        p.score += 10;
+                        authoritativeState.coins[cId].active = false;
+                        authoritativeState.coins[cId].x = (float)GetRandomValue(100, 700);
+                        authoritativeState.coins[cId].y = (float)GetRandomValue(100, 450);
+                        authoritativeState.coins[cId].active = true;
+                    }
+                }
+            }
+
+            // Broadcast Authoritative State to Client
+            std::string outData(reinterpret_cast<char*>(&authoritativeState), sizeof(GameStatePacket));
+            bottomLayer.SendNetworkData(outData);
+        }
 
         // ==========================================================
-        // STEP B: SIMULATION ENGINE (Middle Layer)
+        // CLIENT LOGIC
         // ==========================================================
-        // [FUTURE NETWORK HOOK - HOST]:
-        // If (role == HOST), loop through all connected player inputs before running this.
+        else if (role == NetworkRole::CLIENT) {
+            // Send our input to the Host
+            std::string outData(reinterpret_cast<char*>(&localInput), sizeof(ClientInputPacket));
+            bottomLayer.SendNetworkData(outData);
 
-        float moveSpeed = 4.0f;
+            // Overwrite local world with Host's World State
+            while (bottomLayer.HasIncomingData()) {
+                std::string msg = bottomLayer.GetNextNetworkMessage();
+                size_t offset = 0;
 
-        // Update local player position based on packed input
-        PlayerState& p = authoritativeState.players[0];
-        p.x += localInput.moveX * moveSpeed;
-        p.y += localInput.moveY * moveSpeed;
-
-        // Keep player inside Arena Boundaries (Arena is 50x50 to 750x500)
-        // Player square is 30x30, so half-extents are 15px
-        if (p.x < 65.0f)  p.x = 65.0f;
-        if (p.x > 735.0f) p.x = 735.0f;
-        if (p.y < 65.0f)  p.y = 65.0f;
-        if (p.y > 485.0f) p.y = 485.0f;
-
-        // Check authoritative coin collection
-        for (int i = 0; i < MAX_COINS; i++) {
-            if (authoritativeState.coins[i].active) {
-                if (CheckPlayerCoinCollision(p.x, p.y, authoritativeState.coins[i].x, authoritativeState.coins[i].y)) {
-
-                    // Award point authoritatively
-                    p.score += 10;
-
-                    // Inactive the coin
-                    authoritativeState.coins[i].active = false;
-
-                    // OPTIONAL: Respawn coin somewhere else instantly
-                    authoritativeState.coins[i].x = (float)GetRandomValue(100, 700);
-                    authoritativeState.coins[i].y = (float)GetRandomValue(100, 450);
-                    authoritativeState.coins[i].active = true;
+                while (offset < msg.size()) {
+                    PacketType type = static_cast<PacketType>(msg[offset]);
+                    if (type == PacketType::GAME_STATE && offset + sizeof(GameStatePacket) <= msg.size()) {
+                        memcpy(&authoritativeState, msg.data() + offset, sizeof(GameStatePacket));
+                        offset += sizeof(GameStatePacket);
+                    }
+                    else {
+                        break;
+                    }
                 }
             }
         }
 
-        // [FUTURE NETWORK HOOK - HOST]:
-        // Broadcast the updated authoritativeState packet to all connected clients.
-
         // ==========================================================
-        // STEP C: RENDER (Top Layer)
+        // RENDER (Both Host and Client do this exactly the same way)
         // ==========================================================
         TopLayer::DrawGame(authoritativeState, myLocalPlayerId);
     }

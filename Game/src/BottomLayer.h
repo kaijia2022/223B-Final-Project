@@ -40,12 +40,14 @@ private:
     bool isRunning;
     bool isHost;
 
+    uintptr_t activeSocket = 0;
+
     // Thread-safe message queue for the game loop
     std::queue<std::string> incomingDataQueue;
     std::mutex queueMutex;
 
     // Background thread so TCP waiting doesn't freeze the game
-    std::thread networkThread;
+    std::thread networkThread;  
     void NetworkWorkerLoop();
 
     // Input state

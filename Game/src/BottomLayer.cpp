@@ -1,28 +1,57 @@
 #include "BottomLayer.h"
 #include <iostream>
 
-BottomLayer::BottomLayer() : isRunning(false), isHost(false) {}
+// Include Winsock
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment (lib, "Ws2_32.lib")
+
+BottomLayer::BottomLayer() : isRunning(false), isHost(false), activeSocket(0) {
+    // Initialize Winsock
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+}
 
 BottomLayer::~BottomLayer() {
     isRunning = false;
+    if (activeSocket != 0) {
+        closesocket((SOCKET)activeSocket);
+    }
     if (networkThread.joinable()) {
         networkThread.join();
     }
-    // TODO: Close sockets here
+    WSACleanup();
 }
 
-// ==========================================
-// NETWORKING: HOST & CONNECT
-// ==========================================
 bool BottomLayer::HostGame(int port) {
     isHost = true;
     isRunning = true;
 
-    // TODO: Initialize Winsock, create TCP socket, bind(port), listen()
-    std::cout << "Hosting server on port " << port << "...\n";
+    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY; // Listen on all adapters (Localhost & Hamachi)
+    serverAddr.sin_port = htons(port);
+
+    bind(listenSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
+    listen(listenSocket, 1); // Listen for 1 client for now
+
+    std::cout << "Hosting server on port " << port << "... Waiting for client.\n";
 
     // Start background thread to handle connections and receive data
-    networkThread = std::thread(&BottomLayer::NetworkWorkerLoop, this);
+    networkThread = std::thread([this, listenSocket]() {
+        // Block until the client joins
+        SOCKET clientSocket = accept(listenSocket, NULL, NULL);
+        this->activeSocket = clientSocket;
+        closesocket(listenSocket); // Stop listening for others once we have our 1 client
+
+        std::cout << "Client connected!\n";
+        this->NetworkWorkerLoop();
+        });
+
     return true;
 }
 
@@ -30,21 +59,34 @@ bool BottomLayer::ConnectToGame(const std::string& virtualIp, int port) {
     isHost = false;
     isRunning = true;
 
-    // TODO: Initialize Winsock, create TCP socket, connect(virtualIp, port)
+    SOCKET connectSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    inet_pton(AF_INET, virtualIp.c_str(), &serverAddr.sin_addr);
+    serverAddr.sin_port = htons(port);
+
     std::cout << "Connecting to " << virtualIp << ":" << port << "...\n";
+
+    if (connect(connectSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+        std::cout << "Connection failed.\n";
+        closesocket(connectSocket);
+        return false;
+    }
+
+    std::cout << "Connected to Host!\n";
+    this->activeSocket = connectSocket;
 
     // Start background thread to listen to the server
     networkThread = std::thread(&BottomLayer::NetworkWorkerLoop, this);
     return true;
 }
 
-// ==========================================
-// THREAD-SAFE DATA INTERFACE
-// ==========================================
 void BottomLayer::SendNetworkData(const std::string& payload) {
-    // TODO: send(socket, payload.c_str(), payload.length(), 0)
-    // If isHost, iterate through connected client sockets and send to all
-    // If not isHost, send to the single server socket
+    if (activeSocket != 0) {
+        // Send the raw binary data over TCP
+        send((SOCKET)activeSocket, payload.data(), (int)payload.size(), 0);
+    }
 }
 
 bool BottomLayer::HasIncomingData() {
@@ -61,44 +103,23 @@ std::string BottomLayer::GetNextNetworkMessage() {
     return msg;
 }
 
-// Background thread loop (DO NOT call Raylib functions in here!)
 void BottomLayer::NetworkWorkerLoop() {
-    while (isRunning) {
-        // TODO: recv(socket, buffer, size, 0)
-        // This is a blocking call, which is why it's on a separate thread.
+    char buffer[4096];
+    while (isRunning && activeSocket != 0) {
+        // Block and wait for data
+        int bytesReceived = recv((SOCKET)activeSocket, buffer, sizeof(buffer), 0);
 
-        std::string mockReceivedData = "Player_2_Move_Right"; // Mocked data
+        if (bytesReceived > 0) {
+            // Package the raw bytes into a string safely
+            std::string rawData(buffer, bytesReceived);
 
-        if (!mockReceivedData.empty()) {
-            // Safely push to the queue so the Middle Layer can read it next frame
             std::lock_guard<std::mutex> lock(queueMutex);
-            incomingDataQueue.push(mockReceivedData);
+            incomingDataQueue.push(rawData);
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-}
-
-// ==========================================
-// INPUT INJECTION & ABSTRACTION
-// ==========================================
-void BottomLayer::InjectKeyDown(int keycode) {
-    injectedKeyStates[keycode] = true;
-}
-
-void BottomLayer::InjectKeyUp(int keycode) {
-    injectedKeyStates[keycode] = false;
-}
-
-bool BottomLayer::IsActionPressed(int keycode) {
-    // 1. Check if an automated test is holding the key down
-    if (injectedKeyStates.find(keycode) != injectedKeyStates.end()) {
-        if (injectedKeyStates[keycode] == true) {
-            return true;
+        else if (bytesReceived == 0 || bytesReceived == SOCKET_ERROR) {
+            std::cout << "Connection closed by peer.\n";
+            isRunning = false;
+            break;
         }
     }
-
-    // 2. Fallback to actual physical hardware input (Raylib)
-    // return IsKeyDown(keycode); 
-    return false; // Mocked for now
 }

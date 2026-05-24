@@ -51,6 +51,8 @@ int main() {
         }
     }
 
+    TopLayer::DrawGame(authoritativeState, myLocalPlayerId);
+
     // MAIN GAME LOOP
     while (!WindowShouldClose()) {
         authoritativeState.frameNumber++;

@@ -12,7 +12,7 @@ bool CheckPlayerCoinCollision(float px, float py, float cx, float cy) {
 
 int main() {
     InitWindow(800, 600, "Gold Rush - Multiplayer Ready");
-    SetTargetFPS(60);
+    SetTargetFPS(30);
 
     std::string targetIp = "";
     NetworkRole role = NetworkRole::NONE;
@@ -29,44 +29,67 @@ int main() {
     if (role == NetworkRole::HOST) bottomLayer.HostGame(8080);
     else bottomLayer.ConnectToGame(targetIp, 8080);
 
+    
+
     GameStatePacket authoritativeState = {};
     authoritativeState.frameNumber = 0;
 
-    // HOST ONLY: Initialize World Data
-    if (role == NetworkRole::HOST) {
-        authoritativeState.players[0] = { 0, 200.0f, 250.0f, 0, 0, true }; // Host (Red)
-        authoritativeState.players[1] = { 1, 600.0f, 250.0f, 0, 1, true }; // Client (Blue)
+    //Initialize World Data
+    authoritativeState.players[0] = { 0, 200.0f, 250.0f, 0, 0, true }; // Host (Red)
+    authoritativeState.players[1] = { 1, 600.0f, 250.0f, 0, 1, true }; // Client (Blue)
 
-        for (int i = 2; i < MAX_PLAYERS; i++) authoritativeState.players[i].active = false;
+    for (int i = 2; i < MAX_PLAYERS; i++) authoritativeState.players[i].active = false;
 
-        float mockCoinPositionsX[5] = { 150, 300, 600, 200, 550 };
-        float mockCoinPositionsY[5] = { 120, 400, 200, 350, 420 };
-        for (int i = 0; i < MAX_COINS; i++) {
-            if (i < 5) {
-                authoritativeState.coins[i] = { (uint32_t)i, mockCoinPositionsX[i], mockCoinPositionsY[i], true };
-            }
-            else {
-                authoritativeState.coins[i].active = false;
-            }
+    float mockCoinPositionsX[5] = { 150, 300, 600, 200, 550 };
+    float mockCoinPositionsY[5] = { 120, 400, 200, 350, 420 };
+    for (int i = 0; i < MAX_COINS; i++) {
+        if (i < 5) {
+            authoritativeState.coins[i] = { (uint32_t)i, mockCoinPositionsX[i], mockCoinPositionsY[i], true };
+        }
+        else {
+            authoritativeState.coins[i].active = false;
         }
     }
 
     // MAIN GAME LOOP
     while (!WindowShouldClose()) {
+        authoritativeState.frameNumber++;
+
         float moveSpeed = 4.0f;
 
+        //save most recent action, and resend if requested
+
         // 1. GATHER LOCAL INPUT
-        ClientInputPacket localInput = { PacketType::CLIENT_INPUT, myLocalPlayerId, 0.0f, 0.0f };
+        ClientInputPacket localInput = { PacketType::CLIENT_INPUT, myLocalPlayerId, authoritativeState.frameNumber, 0.0f, 0.0f };
         if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) localInput.moveX = 1.0f;
         if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))  localInput.moveX = -1.0f;
         if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S))  localInput.moveY = 1.0f;
         if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W))    localInput.moveY = -1.0f;
 
+        //sends input
+        std::string outData(reinterpret_cast<char*>(&localInput), sizeof(ClientInputPacket));
+        bottomLayer.SendNetworkData(outData);
+
+        //receive input from opposing player
+        std::string msg = bottomLayer.GetNextNetworkMessage();
+        size_t offset = 0;
+
+        ClientInputPacket remoteInput = (ClientInputPacket) msg;
+        PacketType type = static_cast<PacketType>(msg[offset]);
+        if (type == PacketType::CLIENT_INPUT && offset + sizeof(GameStatePacket) <= msg.size()) {
+
+        }
+        else {
+            //request most recent input if it's not client_input
+            break;
+        }
+
+   
+
         // ==========================================================
         // SERVER (HOST) LOGIC
         // ==========================================================
-        if (role == NetworkRole::HOST) {
-            authoritativeState.frameNumber++;
+            
 
             // Apply Host's local input immediately
             authoritativeState.players[0].x += localInput.moveX * moveSpeed;
@@ -94,7 +117,6 @@ int main() {
                         break;
                     }
                 }
-            }
 
             // Boundary Checks & Collision for ALL players
             for (int pId = 0; pId < 2; pId++) {

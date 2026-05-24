@@ -43,6 +43,7 @@ struct GameStatePacket {
 struct ClientInputPacket {
     PacketType type = PacketType::CLIENT_INPUT;
     uint32_t playerId;
+    uint32_t frameNumber;
     float moveX; // -1.0 (Left) to 1.0 (Right)
     float moveY; // -1.0 (Up) to 1.0 (Down)
 };

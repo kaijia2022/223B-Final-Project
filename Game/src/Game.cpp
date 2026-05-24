@@ -101,7 +101,7 @@ int main() {
         // Always apply host's input first
         ClientInputPacket* remoteInput = reinterpret_cast<ClientInputPacket*>(msg.data());
         PacketType type = static_cast<PacketType>(msg[offset]);
-        if (type == PacketType::CLIENT_INPUT && offset + sizeof(GameStatePacket) <= msg.size()) {
+        if (type == PacketType::CLIENT_INPUT) {
             if (remoteInput->playerId == 0) { //if opponent is host
                 authoritativeState.players[0].x += remoteInput->moveX * moveSpeed;
                 authoritativeState.players[0].y += remoteInput->moveY * moveSpeed;

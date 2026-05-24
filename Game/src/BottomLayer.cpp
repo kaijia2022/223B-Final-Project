@@ -97,7 +97,7 @@ bool BottomLayer::HasIncomingData() {
 std::string BottomLayer::GetNextNetworkMessage() {
     std::lock_guard<std::mutex> lock(queueMutex);
     while (incomingDataQueue.empty()) {
-
+        continue;
     }
 
     std::string msg = incomingDataQueue.front();

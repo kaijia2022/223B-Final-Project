@@ -10,17 +10,17 @@
 #pragma comment(lib, "Ws2_32.lib")
 
 namespace {
-    constexpr int MAX_REMOTE_CLIENTS = MAX_PLAYERS - 1;
+constexpr int MAX_REMOTE_CLIENTS = MAX_PLAYERS - 1;
 
-    bool RecvExact(SOCKET socketHandle, char* dst, int byteCount) {
-        int receivedTotal = 0;
-        while (receivedTotal < byteCount) {
-            int received = recv(socketHandle, dst + receivedTotal, byteCount - receivedTotal, 0);
-            if (received <= 0) return false;
-            receivedTotal += received;
-        }
-        return true;
+bool RecvExact(SOCKET socketHandle, char* dst, int byteCount) {
+    int receivedTotal = 0;
+    while (receivedTotal < byteCount) {
+        int received = recv(socketHandle, dst + receivedTotal, byteCount - receivedTotal, 0);
+        if (received <= 0) return false;
+        receivedTotal += received;
     }
+    return true;
+}
 }
 
 BottomLayer::BottomLayer() : isHost(false), isRunning(false) {
@@ -184,8 +184,7 @@ void BottomLayer::SendNetworkData(const std::string& payload) {
 
     if (isHost) {
         BroadcastFramed(payload);
-    }
-    else if (activeSocket != 0) {
+    } else if (activeSocket != 0) {
         SendFramed(activeSocket, payload);
     }
 }

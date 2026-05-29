@@ -6,25 +6,46 @@
 #include <string>
 #include <limits>
 
-ClientInputPacket BuildLocalInput(uint32_t myLocalPlayerId, uint32_t frame) {
+namespace {
+ClientInputPacket BuildLocalInput(
+    uint32_t myLocalPlayerId,
+    uint32_t frame,
+    const GameStatePacket& currentState
+) {
     ClientInputPacket localInput = {};
     localInput.type = PacketType::CLIENT_INPUT;
     localInput.playerId = myLocalPlayerId;
     localInput.frameNumber = frame;
 
     if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) localInput.moveX += 1.0f;
-    if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) localInput.moveX -= 1.0f;
-    if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) localInput.moveY += 1.0f;
-    if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) localInput.moveY -= 1.0f;
+    if (IsKeyDown(KEY_LEFT)  || IsKeyDown(KEY_A)) localInput.moveX -= 1.0f;
+    if (IsKeyDown(KEY_DOWN)  || IsKeyDown(KEY_S)) localInput.moveY += 1.0f;
+    if (IsKeyDown(KEY_UP)    || IsKeyDown(KEY_W)) localInput.moveY -= 1.0f;
+
+    // Include our latest known player state. Receivers use input history +
+    // rollback when possible, and use this player-state hint when the packet is
+    // outside their rollback window.
+    if (myLocalPlayerId < MAX_PLAYERS) {
+        localInput.playerState = currentState.players[myLocalPlayerId];
+    }
 
     return localInput;
 }
 
+void DrawCenteredStatus(const char* title, const char* line1, const char* line2) {
+    BeginDrawing();
+    ClearBackground(RAYWHITE);
+    DrawText(title, 190, 190, 24, DARKGRAY);
+    DrawText(line1, 190, 240, 20, MAROON);
+    DrawText(line2, 190, 275, 20, GRAY);
+    EndDrawing();
+}
 
 void ProcessNetworkMessage(
     const std::string& msg,
     uint32_t myLocalPlayerId,
     uint32_t currentFrame,
+    GameStatePacket& currentState,
     bool& hasStartSignal,
     bool& hasAssignment,
     uint32_t& assignedPlayerId
@@ -55,12 +76,12 @@ void ProcessNetworkMessage(
         if (DeserializeInput(msg, remoteInput)) {
             // Local input is already stored immediately. Ignore our echo from the host relay.
             if (remoteInput.playerId != myLocalPlayerId) {
-                HandleRemoteInput(remoteInput, currentFrame);
+                HandleRemoteInput(remoteInput, currentFrame, currentState);
             }
         }
     }
 }
-
+}
 
 int main() {
     InitWindow(800, 600, "Gold Rush - Rollback Multiplayer Test");
@@ -81,8 +102,7 @@ int main() {
             CloseWindow();
             return 1;
         }
-    }
-    else {
+    } else {
         if (!bottomLayer.ConnectToGame(targetIp, 8080)) {
             CloseWindow();
             return 1;
@@ -95,6 +115,7 @@ int main() {
 
     bool hasAssignment = (role == NetworkRole::HOST);
     bool hasStartSignal = (role == NetworkRole::HOST);
+    GameStatePacket lobbyState = {};
 
     if (role == NetworkRole::HOST) {
         while (!WindowShouldClose() && !IsKeyPressed(KEY_ENTER)) {
@@ -102,7 +123,7 @@ int main() {
                 // Discard CONNECT packets; assignment is handled by BottomLayer on accept.
                 (void)bottomLayer.GetNextNetworkMessage();
             }
-            TopLayer::DrawCenteredStatus(
+            DrawCenteredStatus(
                 "HOST LOBBY",
                 "Clients may join now. Press ENTER to start.",
                 "Controls: WASD / Arrow Keys. Max players: 4."
@@ -111,8 +132,7 @@ int main() {
 
         StartGamePacket start{};
         bottomLayer.SendNetworkData(SerializeStartGame(start));
-    }
-    else {
+    } else {
         ReadyToStartPacket hello{};
         bottomLayer.SendNetworkData(SerializePacket(hello));
 
@@ -123,13 +143,14 @@ int main() {
                     msg,
                     myLocalPlayerId,
                     0,
+                    lobbyState,
                     hasStartSignal,
                     hasAssignment,
                     myLocalPlayerId
                 );
             }
 
-            TopLayer::DrawCenteredStatus(
+            DrawCenteredStatus(
                 "CLIENT LOBBY",
                 hasAssignment ? "Assigned player ID. Waiting for host start." : "Waiting for player assignment.",
                 "Ask the host to press ENTER after everyone joins."
@@ -156,6 +177,7 @@ int main() {
                 msg,
                 myLocalPlayerId,
                 currentState.frameNumber,
+                currentState,
                 hasStartSignal,
                 hasAssignment,
                 myLocalPlayerId
@@ -171,7 +193,7 @@ int main() {
         const uint32_t frame = currentState.frameNumber;
         const int index = static_cast<int>(frame % INPUT_BUFFER_SIZE);
 
-        ClientInputPacket localInput = BuildLocalInput(myLocalPlayerId, frame);
+        ClientInputPacket localInput = BuildLocalInput(myLocalPlayerId, frame, currentState);
         StoreLocalInput(localInput);
         bottomLayer.SendNetworkData(SerializeInput(localInput));
 

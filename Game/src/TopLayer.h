@@ -15,16 +15,6 @@ public:
         }
     }
 
-
-    static void DrawCenteredStatus(const char* title, const char* line1, const char* line2) {
-        BeginDrawing();
-        ClearBackground(RAYWHITE);
-        DrawText(title, 190, 190, 24, DARKGRAY);
-        DrawText(line1, 190, 240, 20, MAROON);
-        DrawText(line2, 190, 275, 20, GRAY);
-        EndDrawing();
-    }
-
     static void DrawGame(const GameStatePacket& state, uint32_t localPlayerId) {
         BeginDrawing();
         ClearBackground(RAYWHITE);

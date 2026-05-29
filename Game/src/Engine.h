@@ -61,6 +61,13 @@ struct ClientInputPacket {
     uint32_t frameNumber;
     float moveX;
     float moveY;
+
+    // Rollback/state-resync hint.
+    // For normal packets inside the rollback window, the receiver corrects by
+    // replacing predicted input and replaying. If the packet is too far outside
+    // the local rollback window, the receiver cannot replay safely, so it uses
+    // this state to resync only that peer/player instead of dropping the update.
+    PlayerState playerState;
 };
 
 #pragma pack(pop)
@@ -75,6 +82,7 @@ extern bool wasPredicted[MAX_PLAYERS][INPUT_BUFFER_SIZE];
 extern GameStatePacket stateHistory[INPUT_BUFFER_SIZE];
 extern bool needsRollback;
 extern uint32_t rollbackFrame;
+extern uint32_t latestPeerStateFrame[MAX_PLAYERS];
 
 bool CheckPlayerCoinCollision(float px, float py, float cx, float cy);
 void InitializeGameState(GameStatePacket& state);
@@ -84,7 +92,7 @@ void SimulateFrame(GameStatePacket& state, const ClientInputPacket inputs[MAX_PL
 bool SameInput(const ClientInputPacket& a, const ClientInputPacket& b);
 ClientInputPacket PredictInput(uint32_t playerId, uint32_t frameNumber);
 void StoreLocalInput(const ClientInputPacket& input);
-void HandleRemoteInput(const ClientInputPacket& remoteInput, uint32_t currentFrame);
+void HandleRemoteInput(const ClientInputPacket& remoteInput, uint32_t currentFrame, GameStatePacket& currentState);
 void BuildFrameInputs(const GameStatePacket& state, uint32_t frame, ClientInputPacket outInputs[MAX_PLAYERS]);
 void RollbackAndReplay(uint32_t rollbackFrame, uint32_t currentFrame, GameStatePacket& currentState);
 
@@ -97,6 +105,7 @@ std::string SerializeAssignPlayer(const AssignPlayerPacket& packet);
 bool DeserializeInput(const std::string& payload, ClientInputPacket& outPacket);
 bool DeserializeAssignPlayer(const std::string& payload, AssignPlayerPacket& outPacket);
 bool DeserializeStartGame(const std::string& payload, StartGamePacket& outPacket);
+void ApplyPeerStateResync(const ClientInputPacket& remoteInput, GameStatePacket& currentState);
 
 template <typename T>
 std::string SerializePacket(const T& packet) {

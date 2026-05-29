@@ -7,6 +7,7 @@ bool wasPredicted[MAX_PLAYERS][INPUT_BUFFER_SIZE] = {};
 GameStatePacket stateHistory[INPUT_BUFFER_SIZE] = {};
 bool needsRollback = false;
 uint32_t rollbackFrame = 0;
+uint32_t latestPeerStateFrame[MAX_PLAYERS] = {};
 
 bool CheckPlayerCoinCollision(float px, float py, float cx, float cy) {
     const float distanceSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
@@ -39,8 +40,7 @@ void InitializeGameState(GameStatePacket& state) {
             state.coins[i].x = coinX[i];
             state.coins[i].y = coinY[i];
             state.coins[i].active = true;
-        }
-        else {
+        } else {
             state.coins[i].x = 0.0f;
             state.coins[i].y = 0.0f;
             state.coins[i].active = false;
@@ -53,6 +53,7 @@ void ResetRollbackBuffers() {
     std::memset(hasInput, 0, sizeof(hasInput));
     std::memset(wasPredicted, 0, sizeof(wasPredicted));
     std::memset(stateHistory, 0, sizeof(stateHistory));
+    std::memset(latestPeerStateFrame, 0, sizeof(latestPeerStateFrame));
     needsRollback = false;
     rollbackFrame = 0;
 }
@@ -108,28 +109,71 @@ void StoreLocalInput(const ClientInputPacket& input) {
     inputHistory[input.playerId][index] = input;
     hasInput[input.playerId][index] = true;
     wasPredicted[input.playerId][index] = false;
+    latestPeerStateFrame[input.playerId] = std::max(latestPeerStateFrame[input.playerId], input.frameNumber);
 }
 
-void HandleRemoteInput(const ClientInputPacket& remoteInput, uint32_t currentFrame) {
+void ApplyPeerStateResync(const ClientInputPacket& remoteInput, GameStatePacket& currentState) {
     if (remoteInput.playerId >= MAX_PLAYERS) return;
-    if (remoteInput.frameNumber + MAX_ROLLBACK_FRAMES < currentFrame) return;
-    if (remoteInput.frameNumber > currentFrame + MAX_ROLLBACK_FRAMES) return;
+
+    // Only apply the newest state we have seen from this peer. Older packets can
+    // still fill input history, but should not visually/simulation-wise rewind
+    // that peer when we are outside the rollback window.
+    if (remoteInput.frameNumber < latestPeerStateFrame[remoteInput.playerId]) return;
+
+    PlayerState corrected = remoteInput.playerState;
+    corrected.id = remoteInput.playerId;
+    corrected.colorId = static_cast<uint8_t>(remoteInput.playerId);
+    corrected.active = true;
+
+    currentState.players[remoteInput.playerId] = corrected;
+    latestPeerStateFrame[remoteInput.playerId] = remoteInput.frameNumber;
+}
+
+void HandleRemoteInput(const ClientInputPacket& remoteInput, uint32_t currentFrame, GameStatePacket& currentState) {
+    if (remoteInput.playerId >= MAX_PLAYERS) return;
 
     const int index = static_cast<int>(remoteInput.frameNumber % INPUT_BUFFER_SIZE);
-    const ClientInputPacket oldInput = inputHistory[remoteInput.playerId][index];
 
-    const bool predictionWasWrong =
-        wasPredicted[remoteInput.playerId][index] && !SameInput(oldInput, remoteInput);
+    // Keep the input whenever it is safe to store in the ring buffer. This avoids
+    // discarding useful future input while still protecting against very large
+    // frame jumps overwriting unrelated history slots.
+    const bool safeToStoreInHistory =
+        (remoteInput.frameNumber + INPUT_BUFFER_SIZE > currentFrame) &&
+        (remoteInput.frameNumber < currentFrame + INPUT_BUFFER_SIZE);
 
-    inputHistory[remoteInput.playerId][index] = remoteInput;
-    hasInput[remoteInput.playerId][index] = true;
-    wasPredicted[remoteInput.playerId][index] = false;
+    if (safeToStoreInHistory) {
+        const ClientInputPacket oldInput = inputHistory[remoteInput.playerId][index];
+        const bool predictionWasWrong =
+            wasPredicted[remoteInput.playerId][index] && !SameInput(oldInput, remoteInput);
 
-    if (predictionWasWrong) {
-        if (!needsRollback || remoteInput.frameNumber < rollbackFrame) {
-            needsRollback = true;
-            rollbackFrame = remoteInput.frameNumber;
+        inputHistory[remoteInput.playerId][index] = remoteInput;
+        hasInput[remoteInput.playerId][index] = true;
+        wasPredicted[remoteInput.playerId][index] = false;
+
+        const bool canRollbackToFrame =
+            remoteInput.frameNumber <= currentFrame &&
+            remoteInput.frameNumber + MAX_ROLLBACK_FRAMES >= currentFrame;
+
+        if (predictionWasWrong && canRollbackToFrame) {
+            if (!needsRollback) {
+                needsRollback = true;
+                rollbackFrame = remoteInput.frameNumber;
+            }
+            else if (remoteInput.frameNumber < rollbackFrame) {
+                rollbackFrame = remoteInput.frameNumber;
+            }
+            return;
         }
+    }
+
+    // If the packet is outside our rollback window, do not drop the peer update.
+    // Use the sender's latest player state as a peer-state resync point.
+    const bool outsideRollbackWindow =
+        (remoteInput.frameNumber > currentFrame + MAX_ROLLBACK_FRAMES) ||
+        (remoteInput.frameNumber + MAX_ROLLBACK_FRAMES < currentFrame);
+
+    if (outsideRollbackWindow) {
+        ApplyPeerStateResync(remoteInput, currentState);
     }
 }
 
@@ -144,8 +188,7 @@ void BuildFrameInputs(const GameStatePacket& state, uint32_t frame, ClientInputP
 
         if (hasInput[playerId][index]) {
             outInputs[playerId] = inputHistory[playerId][index];
-        }
-        else {
+        } else {
             ClientInputPacket predicted = PredictInput(playerId, frame);
             inputHistory[playerId][index] = predicted;
             hasInput[playerId][index] = true;
@@ -160,7 +203,7 @@ void RollbackAndReplay(uint32_t rollbackStartFrame, uint32_t currentFrame, GameS
 
     currentState = stateHistory[rollbackStartFrame % INPUT_BUFFER_SIZE];
 
-    for (uint32_t frame = rollbackStartFrame; frame < currentFrame; ++frame) {
+    for (uint32_t frame = rollbackStartFrame; frame <= currentFrame; ++frame) {
         currentState.frameNumber = frame;
         ClientInputPacket frameInputs[MAX_PLAYERS] = {};
         BuildFrameInputs(currentState, frame, frameInputs);

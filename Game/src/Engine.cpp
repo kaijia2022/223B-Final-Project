@@ -7,16 +7,23 @@ bool wasPredicted[MAX_PLAYERS][INPUT_BUFFER_SIZE] = {};
 GameStatePacket stateHistory[INPUT_BUFFER_SIZE] = {};
 bool needsRollback = false;
 uint32_t rollbackFrame = 0;
-uint32_t latestPeerStateFrame[MAX_PLAYERS] = {};
 
 bool CheckPlayerCoinCollision(float px, float py, float cx, float cy) {
     const float distanceSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
     return distanceSq < 625.0f;
 }
 
-void InitializeGameState(GameStatePacket& state) {
+void SetActivePlayers(GameStatePacket& state, uint32_t activePlayerMask) {
+    for (uint32_t i = 0; i < MAX_PLAYERS; ++i) {
+        state.players[i].id = i;
+        state.players[i].colorId = static_cast<uint8_t>(i);
+        state.players[i].active = ((activePlayerMask & (1u << i)) != 0);
+    }
+}
+
+void InitializeGameState(GameStatePacket& state, uint32_t activePlayerMask) {
     std::memset(&state, 0, sizeof(GameStatePacket));
-    state.type = PacketType::GAME_STATE;
+    state.type = PacketType::GAME_STATE_RESYNC;
     state.frameNumber = 0;
 
     const float startX[MAX_PLAYERS] = { 200.0f, 600.0f, 200.0f, 600.0f };
@@ -28,7 +35,7 @@ void InitializeGameState(GameStatePacket& state) {
         state.players[i].y = startY[i];
         state.players[i].score = 0;
         state.players[i].colorId = static_cast<uint8_t>(i);
-        state.players[i].active = true; // Enable all 4 slots for rollback testing.
+        state.players[i].active = ((activePlayerMask & (1u << i)) != 0);
     }
 
     const float coinX[5] = { 150, 300, 600, 200, 550 };
@@ -41,8 +48,6 @@ void InitializeGameState(GameStatePacket& state) {
             state.coins[i].y = coinY[i];
             state.coins[i].active = true;
         } else {
-            state.coins[i].x = 0.0f;
-            state.coins[i].y = 0.0f;
             state.coins[i].active = false;
         }
     }
@@ -53,7 +58,6 @@ void ResetRollbackBuffers() {
     std::memset(hasInput, 0, sizeof(hasInput));
     std::memset(wasPredicted, 0, sizeof(wasPredicted));
     std::memset(stateHistory, 0, sizeof(stateHistory));
-    std::memset(latestPeerStateFrame, 0, sizeof(latestPeerStateFrame));
     needsRollback = false;
     rollbackFrame = 0;
 }
@@ -84,7 +88,19 @@ void SimulateFrame(GameStatePacket& state, const ClientInputPacket inputs[MAX_PL
 }
 
 bool SameInput(const ClientInputPacket& a, const ClientInputPacket& b) {
-    return a.playerId == b.playerId && a.moveX == b.moveX && a.moveY == b.moveY;
+    return a.playerId == b.playerId &&
+           a.frameNumber == b.frameNumber &&
+           a.moveX == b.moveX &&
+           a.moveY == b.moveY;
+}
+
+bool IsConfirmedInput(uint32_t playerId, uint32_t frameNumber) {
+    if (playerId >= MAX_PLAYERS) return false;
+    const int index = static_cast<int>(frameNumber % INPUT_BUFFER_SIZE);
+    return hasInput[playerId][index] &&
+           !wasPredicted[playerId][index] &&
+           inputHistory[playerId][index].frameNumber == frameNumber &&
+           inputHistory[playerId][index].playerId == playerId;
 }
 
 ClientInputPacket PredictInput(uint32_t playerId, uint32_t frameNumber) {
@@ -96,8 +112,10 @@ ClientInputPacket PredictInput(uint32_t playerId, uint32_t frameNumber) {
     if (frameNumber > 0) {
         const int previousIndex = static_cast<int>((frameNumber - 1) % INPUT_BUFFER_SIZE);
         const ClientInputPacket& previous = inputHistory[playerId][previousIndex];
-        predicted.moveX = previous.moveX;
-        predicted.moveY = previous.moveY;
+        if (previous.playerId == playerId && previous.frameNumber == frameNumber - 1) {
+            predicted.moveX = previous.moveX;
+            predicted.moveY = previous.moveY;
+        }
     }
 
     return predicted;
@@ -109,71 +127,39 @@ void StoreLocalInput(const ClientInputPacket& input) {
     inputHistory[input.playerId][index] = input;
     hasInput[input.playerId][index] = true;
     wasPredicted[input.playerId][index] = false;
-    latestPeerStateFrame[input.playerId] = std::max(latestPeerStateFrame[input.playerId], input.frameNumber);
 }
 
-void ApplyPeerStateResync(const ClientInputPacket& remoteInput, GameStatePacket& currentState) {
+void HandleRemoteInput(const ClientInputPacket& remoteInput, uint32_t currentFrame) {
     if (remoteInput.playerId >= MAX_PLAYERS) return;
 
-    // Only apply the newest state we have seen from this peer. Older packets can
-    // still fill input history, but should not visually/simulation-wise rewind
-    // that peer when we are outside the rollback window.
-    if (remoteInput.frameNumber < latestPeerStateFrame[remoteInput.playerId]) return;
-
-    PlayerState corrected = remoteInput.playerState;
-    corrected.id = remoteInput.playerId;
-    corrected.colorId = static_cast<uint8_t>(remoteInput.playerId);
-    corrected.active = true;
-
-    currentState.players[remoteInput.playerId] = corrected;
-    latestPeerStateFrame[remoteInput.playerId] = remoteInput.frameNumber;
-}
-
-void HandleRemoteInput(const ClientInputPacket& remoteInput, uint32_t currentFrame, GameStatePacket& currentState) {
-    if (remoteInput.playerId >= MAX_PLAYERS) return;
+    // Far-future packets are kept only when their ring slot is safe. In normal
+    // operation the 50-frame stall rule prevents us from running too far away
+    // from unconfirmed peer inputs.
+    if (remoteInput.frameNumber >= currentFrame + INPUT_BUFFER_SIZE) return;
+    if (remoteInput.frameNumber + INPUT_BUFFER_SIZE <= currentFrame) return;
 
     const int index = static_cast<int>(remoteInput.frameNumber % INPUT_BUFFER_SIZE);
+    const ClientInputPacket oldInput = inputHistory[remoteInput.playerId][index];
+    const bool oldWasPrediction =
+        hasInput[remoteInput.playerId][index] &&
+        wasPredicted[remoteInput.playerId][index] &&
+        oldInput.frameNumber == remoteInput.frameNumber;
 
-    // Keep the input whenever it is safe to store in the ring buffer. This avoids
-    // discarding useful future input while still protecting against very large
-    // frame jumps overwriting unrelated history slots.
-    const bool safeToStoreInHistory =
-        (remoteInput.frameNumber + INPUT_BUFFER_SIZE > currentFrame) &&
-        (remoteInput.frameNumber < currentFrame + INPUT_BUFFER_SIZE);
+    const bool predictionWasWrong = oldWasPrediction && !SameInput(oldInput, remoteInput);
 
-    if (safeToStoreInHistory) {
-        const ClientInputPacket oldInput = inputHistory[remoteInput.playerId][index];
-        const bool predictionWasWrong =
-            wasPredicted[remoteInput.playerId][index] && !SameInput(oldInput, remoteInput);
+    inputHistory[remoteInput.playerId][index] = remoteInput;
+    hasInput[remoteInput.playerId][index] = true;
+    wasPredicted[remoteInput.playerId][index] = false;
 
-        inputHistory[remoteInput.playerId][index] = remoteInput;
-        hasInput[remoteInput.playerId][index] = true;
-        wasPredicted[remoteInput.playerId][index] = false;
+    const bool canRollbackToFrame =
+        remoteInput.frameNumber <= currentFrame &&
+        remoteInput.frameNumber + MAX_ROLLBACK_FRAMES >= currentFrame;
 
-        const bool canRollbackToFrame =
-            remoteInput.frameNumber <= currentFrame &&
-            remoteInput.frameNumber + MAX_ROLLBACK_FRAMES >= currentFrame;
-
-        if (predictionWasWrong && canRollbackToFrame) {
-            if (!needsRollback) {
-                needsRollback = true;
-                rollbackFrame = remoteInput.frameNumber;
-            }
-            else if (remoteInput.frameNumber < rollbackFrame) {
-                rollbackFrame = remoteInput.frameNumber;
-            }
-            return;
+    if (canRollbackToFrame && predictionWasWrong) {
+        if (!needsRollback || remoteInput.frameNumber < rollbackFrame) {
+            needsRollback = true;
+            rollbackFrame = remoteInput.frameNumber;
         }
-    }
-
-    // If the packet is outside our rollback window, do not drop the peer update.
-    // Use the sender's latest player state as a peer-state resync point.
-    const bool outsideRollbackWindow =
-        (remoteInput.frameNumber > currentFrame + MAX_ROLLBACK_FRAMES) ||
-        (remoteInput.frameNumber + MAX_ROLLBACK_FRAMES < currentFrame);
-
-    if (outsideRollbackWindow) {
-        ApplyPeerStateResync(remoteInput, currentState);
     }
 }
 
@@ -186,7 +172,7 @@ void BuildFrameInputs(const GameStatePacket& state, uint32_t frame, ClientInputP
             continue;
         }
 
-        if (hasInput[playerId][index]) {
+        if (hasInput[playerId][index] && inputHistory[playerId][index].frameNumber == frame) {
             outInputs[playerId] = inputHistory[playerId][index];
         } else {
             ClientInputPacket predicted = PredictInput(playerId, frame);
@@ -198,12 +184,31 @@ void BuildFrameInputs(const GameStatePacket& state, uint32_t frame, ClientInputP
     }
 }
 
+bool ShouldFreezeForMissingInput(const GameStatePacket& state, uint32_t myLocalPlayerId, uint32_t currentFrame, uint32_t* missingPlayerId, uint32_t* missingFrame) {
+    if (currentFrame <= MAX_ROLLBACK_FRAMES) return false;
+
+    const uint32_t requiredFrame = currentFrame - MAX_ROLLBACK_FRAMES;
+    for (uint32_t playerId = 0; playerId < MAX_PLAYERS; ++playerId) {
+        if (playerId == myLocalPlayerId) continue;
+        if (!state.players[playerId].active) continue;
+
+        if (!IsConfirmedInput(playerId, requiredFrame)) {
+            if (missingPlayerId) *missingPlayerId = playerId;
+            if (missingFrame) *missingFrame = requiredFrame;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void RollbackAndReplay(uint32_t rollbackStartFrame, uint32_t currentFrame, GameStatePacket& currentState) {
     if (rollbackStartFrame + MAX_ROLLBACK_FRAMES < currentFrame) return;
+    if (rollbackStartFrame >= currentFrame) return;
 
     currentState = stateHistory[rollbackStartFrame % INPUT_BUFFER_SIZE];
 
-    for (uint32_t frame = rollbackStartFrame; frame <= currentFrame; ++frame) {
+    for (uint32_t frame = rollbackStartFrame; frame < currentFrame; ++frame) {
         currentState.frameNumber = frame;
         ClientInputPacket frameInputs[MAX_PLAYERS] = {};
         BuildFrameInputs(currentState, frame, frameInputs);
@@ -215,30 +220,20 @@ void RollbackAndReplay(uint32_t rollbackStartFrame, uint32_t currentFrame, GameS
 }
 
 PacketType PeekPacketType(const std::string& payload) {
-    if (payload.empty()) return PacketType::CONNECT;
+    if (payload.empty()) return PacketType::JOIN_REQUEST;
     return static_cast<PacketType>(static_cast<uint8_t>(payload[0]));
 }
 
-std::string SerializeInput(const ClientInputPacket& packet) {
-    return SerializePacket(packet);
-}
+std::string SerializeInput(const ClientInputPacket& packet) { return SerializePacket(packet); }
+std::string SerializeJoinRequest(const JoinRequestPacket& packet) { return SerializePacket(packet); }
+std::string SerializeAssignPlayer(const AssignPlayerPacket& packet) { return SerializePacket(packet); }
+std::string SerializePeerList(const PeerListPacket& packet) { return SerializePacket(packet); }
+std::string SerializeStartGame(const StartGamePacket& packet) { return SerializePacket(packet); }
+std::string SerializePeerHello(const PeerHelloPacket& packet) { return SerializePacket(packet); }
 
-std::string SerializeStartGame(const StartGamePacket& packet) {
-    return SerializePacket(packet);
-}
-
-std::string SerializeAssignPlayer(const AssignPlayerPacket& packet) {
-    return SerializePacket(packet);
-}
-
-bool DeserializeInput(const std::string& payload, ClientInputPacket& outPacket) {
-    return DeserializePacket(payload, outPacket, PacketType::CLIENT_INPUT);
-}
-
-bool DeserializeAssignPlayer(const std::string& payload, AssignPlayerPacket& outPacket) {
-    return DeserializePacket(payload, outPacket, PacketType::ASSIGN_PLAYER);
-}
-
-bool DeserializeStartGame(const std::string& payload, StartGamePacket& outPacket) {
-    return DeserializePacket(payload, outPacket, PacketType::START_GAME);
-}
+bool DeserializeInput(const std::string& payload, ClientInputPacket& outPacket) { return DeserializePacket(payload, outPacket, PacketType::CLIENT_INPUT); }
+bool DeserializeJoinRequest(const std::string& payload, JoinRequestPacket& outPacket) { return DeserializePacket(payload, outPacket, PacketType::JOIN_REQUEST); }
+bool DeserializeAssignPlayer(const std::string& payload, AssignPlayerPacket& outPacket) { return DeserializePacket(payload, outPacket, PacketType::ASSIGN_PLAYER); }
+bool DeserializePeerList(const std::string& payload, PeerListPacket& outPacket) { return DeserializePacket(payload, outPacket, PacketType::PEER_LIST); }
+bool DeserializeStartGame(const std::string& payload, StartGamePacket& outPacket) { return DeserializePacket(payload, outPacket, PacketType::START_GAME); }
+bool DeserializePeerHello(const std::string& payload, PeerHelloPacket& outPacket) { return DeserializePacket(payload, outPacket, PacketType::PEER_HELLO); }

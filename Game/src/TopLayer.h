@@ -15,7 +15,7 @@ public:
         }
     }
 
-    static void DrawGame(const GameStatePacket& state, uint32_t localPlayerId) {
+    static void DrawGame(const GameStatePacket& state, uint32_t localPlayerId, const std::string& overlayText = "") {
         BeginDrawing();
         ClearBackground(RAYWHITE);
 
@@ -65,6 +65,11 @@ public:
         std::string frameText = "Frame: " + std::to_string(state.frameNumber) + " | You are P" + std::to_string(localPlayerId);
         DrawText(frameText.c_str(), 50, 555, 16, DARKGRAY);
         DrawText("Move with WASD or Arrow Keys", 420, 555, 16, DARKGRAY);
+
+        if (!overlayText.empty()) {
+            DrawRectangle(0, 0, 800, 36, Fade(LIGHTGRAY, 0.92f));
+            DrawText(overlayText.c_str(), 12, 10, 16, MAROON);
+        }
 
         EndDrawing();
     }

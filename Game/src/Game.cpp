@@ -4,87 +4,47 @@
 #include "TopLayer.h"
 #include "BottomLayer.h"
 #include <string>
-#include <limits>
 
-namespace {
-ClientInputPacket BuildLocalInput(
-    uint32_t myLocalPlayerId,
-    uint32_t frame,
-    const GameStatePacket& currentState
-) {
+
+ClientInputPacket BuildLocalInput(uint32_t myLocalPlayerId, uint32_t frame) {
     ClientInputPacket localInput = {};
     localInput.type = PacketType::CLIENT_INPUT;
     localInput.playerId = myLocalPlayerId;
     localInput.frameNumber = frame;
 
+    // Actions only: send direction intent, not world-space coordinates.
     if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) localInput.moveX += 1.0f;
     if (IsKeyDown(KEY_LEFT)  || IsKeyDown(KEY_A)) localInput.moveX -= 1.0f;
     if (IsKeyDown(KEY_DOWN)  || IsKeyDown(KEY_S)) localInput.moveY += 1.0f;
     if (IsKeyDown(KEY_UP)    || IsKeyDown(KEY_W)) localInput.moveY -= 1.0f;
 
-    // Include our latest known player state. Receivers use input history +
-    // rollback when possible, and use this player-state hint when the packet is
-    // outside their rollback window.
-    if (myLocalPlayerId < MAX_PLAYERS) {
-        localInput.playerState = currentState.players[myLocalPlayerId];
-    }
-
     return localInput;
 }
 
-void DrawCenteredStatus(const char* title, const char* line1, const char* line2) {
+void DrawCenteredStatus(const char* title, const std::string& line1, const std::string& line2) {
     BeginDrawing();
     ClearBackground(RAYWHITE);
-    DrawText(title, 190, 190, 24, DARKGRAY);
-    DrawText(line1, 190, 240, 20, MAROON);
-    DrawText(line2, 190, 275, 20, GRAY);
+    DrawText(title, 140, 170, 24, DARKGRAY);
+    DrawText(line1.c_str(), 140, 225, 20, MAROON);
+    DrawText(line2.c_str(), 140, 260, 20, GRAY);
     EndDrawing();
 }
 
-void ProcessNetworkMessage(
-    const std::string& msg,
-    uint32_t myLocalPlayerId,
-    uint32_t currentFrame,
-    GameStatePacket& currentState,
-    bool& hasStartSignal,
-    bool& hasAssignment,
-    uint32_t& assignedPlayerId
-) {
+void ProcessGameplayPacket(const std::string& msg, uint32_t myLocalPlayerId, uint32_t currentFrame) {
     if (msg.empty()) return;
 
     const PacketType type = PeekPacketType(msg);
-
-    if (type == PacketType::ASSIGN_PLAYER) {
-        AssignPlayerPacket assign{};
-        if (DeserializeAssignPlayer(msg, assign)) {
-            assignedPlayerId = assign.playerId;
-            hasAssignment = true;
-        }
-        return;
-    }
-
-    if (type == PacketType::START_GAME) {
-        StartGamePacket start{};
-        if (DeserializeStartGame(msg, start)) {
-            hasStartSignal = true;
-        }
-        return;
-    }
-
     if (type == PacketType::CLIENT_INPUT) {
         ClientInputPacket remoteInput{};
-        if (DeserializeInput(msg, remoteInput)) {
-            // Local input is already stored immediately. Ignore our echo from the host relay.
-            if (remoteInput.playerId != myLocalPlayerId) {
-                HandleRemoteInput(remoteInput, currentFrame, currentState);
-            }
+        if (DeserializeInput(msg, remoteInput) && remoteInput.playerId != myLocalPlayerId) {
+            HandleRemoteInput(remoteInput, currentFrame);
         }
     }
 }
-}
+
 
 int main() {
-    InitWindow(800, 600, "Gold Rush - Rollback Multiplayer Test");
+    InitWindow(800, 600, "Gold Rush - P2P Rollback Multiplayer Test");
     SetTargetFPS(60);
 
     std::string targetIp;
@@ -109,51 +69,26 @@ int main() {
         }
     }
 
-    uint32_t myLocalPlayerId = (role == NetworkRole::HOST)
-        ? 0u
-        : std::numeric_limits<uint32_t>::max();
-
-    bool hasAssignment = (role == NetworkRole::HOST);
-    bool hasStartSignal = (role == NetworkRole::HOST);
-    GameStatePacket lobbyState = {};
-
     if (role == NetworkRole::HOST) {
         while (!WindowShouldClose() && !IsKeyPressed(KEY_ENTER)) {
-            while (bottomLayer.HasIncomingData()) {
-                // Discard CONNECT packets; assignment is handled by BottomLayer on accept.
-                (void)bottomLayer.GetNextNetworkMessage();
-            }
             DrawCenteredStatus(
                 "HOST LOBBY",
-                "Clients may join now. Press ENTER to start.",
-                "Controls: WASD / Arrow Keys. Max players: 4."
+                "Clients may join. Press ENTER to start. Host is discovery only; gameplay is P2P.",
+                "Direct peers connected: " + std::to_string(bottomLayer.GetConnectedPeerCount())
             );
         }
-
-        StartGamePacket start{};
-        bottomLayer.SendNetworkData(SerializeStartGame(start));
+        bottomLayer.BroadcastStartGame();
     } else {
-        ReadyToStartPacket hello{};
-        bottomLayer.SendNetworkData(SerializePacket(hello));
-
-        while (!WindowShouldClose() && (!hasAssignment || !hasStartSignal)) {
-            while (bottomLayer.HasIncomingData()) {
-                std::string msg = bottomLayer.GetNextNetworkMessage();
-                ProcessNetworkMessage(
-                    msg,
-                    myLocalPlayerId,
-                    0,
-                    lobbyState,
-                    hasStartSignal,
-                    hasAssignment,
-                    myLocalPlayerId
-                );
-            }
+        while (!WindowShouldClose() && (!bottomLayer.HasPlayerAssignment() || !bottomLayer.IsGameStarted())) {
+            std::string line1 = bottomLayer.HasPlayerAssignment()
+                ? "Assigned player " + std::to_string(bottomLayer.GetLocalPlayerId()) + ". Waiting for host start."
+                : "Waiting for player assignment from host.";
 
             DrawCenteredStatus(
                 "CLIENT LOBBY",
-                hasAssignment ? "Assigned player ID. Waiting for host start." : "Waiting for player assignment.",
-                "Ask the host to press ENTER after everyone joins."
+                line1,
+                "Local peer port: " + std::to_string(bottomLayer.GetLocalPeerPort()) +
+                    " | Direct peers: " + std::to_string(bottomLayer.GetConnectedPeerCount())
             );
         }
     }
@@ -163,25 +98,18 @@ int main() {
         return 0;
     }
 
-    GameStatePacket currentState = {};
-    InitializeGameState(currentState);
-    ResetRollbackBuffers();
+    const uint32_t myLocalPlayerId = bottomLayer.GetLocalPlayerId();
+    const uint32_t activePlayerMask = bottomLayer.GetKnownPlayerMask();
 
-    // Save frame 0 for rollback safety.
+    GameStatePacket currentState = {};
+    InitializeGameState(currentState, activePlayerMask);
+    ResetRollbackBuffers();
     stateHistory[0] = currentState;
 
     while (!WindowShouldClose()) {
         while (bottomLayer.HasIncomingData()) {
             std::string msg = bottomLayer.GetNextNetworkMessage();
-            ProcessNetworkMessage(
-                msg,
-                myLocalPlayerId,
-                currentState.frameNumber,
-                currentState,
-                hasStartSignal,
-                hasAssignment,
-                myLocalPlayerId
-            );
+            ProcessGameplayPacket(msg, myLocalPlayerId, currentState.frameNumber);
         }
 
         if (needsRollback) {
@@ -189,21 +117,55 @@ int main() {
             needsRollback = false;
         }
 
-        currentState.frameNumber++;
-        const uint32_t frame = currentState.frameNumber;
-        const int index = static_cast<int>(frame % INPUT_BUFFER_SIZE);
+        uint32_t missingPlayerId = UINT32_MAX;
+        uint32_t missingFrame = 0;
+        const bool freezeForInput = ShouldFreezeForMissingInput(
+            currentState,
+            myLocalPlayerId,
+            currentState.frameNumber,
+            &missingPlayerId,
+            &missingFrame
+        );
 
-        ClientInputPacket localInput = BuildLocalInput(myLocalPlayerId, frame, currentState);
-        StoreLocalInput(localInput);
-        bottomLayer.SendNetworkData(SerializeInput(localInput));
+        if (!freezeForInput) {
+            currentState.frameNumber++;
+            const uint32_t frame = currentState.frameNumber;
+            const int index = static_cast<int>(frame % INPUT_BUFFER_SIZE);
 
-        ClientInputPacket frameInputs[MAX_PLAYERS] = {};
-        BuildFrameInputs(currentState, frame, frameInputs);
+            ClientInputPacket localInput = BuildLocalInput(myLocalPlayerId, frame);
+            StoreLocalInput(localInput);
+            bottomLayer.SendNetworkData(SerializeInput(localInput));
 
-        stateHistory[index] = currentState;
-        SimulateFrame(currentState, frameInputs);
+            ClientInputPacket frameInputs[MAX_PLAYERS] = {};
+            BuildFrameInputs(currentState, frame, frameInputs);
 
-        TopLayer::DrawGame(currentState, myLocalPlayerId);
+            stateHistory[index] = currentState;
+            SimulateFrame(currentState, frameInputs);
+        } else {
+            // Keep resending this client's confirmed local actions inside the
+            // rollback window. This helps a peer catch up if the direct P2P
+            // connection was established slightly late.
+            const uint32_t firstFrame = currentState.frameNumber > MAX_ROLLBACK_FRAMES
+                ? currentState.frameNumber - MAX_ROLLBACK_FRAMES
+                : 1;
+            for (uint32_t frame = firstFrame; frame <= currentState.frameNumber; ++frame) {
+                const int index = static_cast<int>(frame % INPUT_BUFFER_SIZE);
+                if (myLocalPlayerId < MAX_PLAYERS &&
+                    hasInput[myLocalPlayerId][index] &&
+                    !wasPredicted[myLocalPlayerId][index] &&
+                    inputHistory[myLocalPlayerId][index].frameNumber == frame) {
+                    bottomLayer.SendNetworkData(SerializeInput(inputHistory[myLocalPlayerId][index]));
+                }
+            }
+        }
+
+        std::string overlay;
+        if (freezeForInput) {
+            overlay = "Rollback window full: waiting for P" + std::to_string(missingPlayerId) +
+                " input for frame " + std::to_string(missingFrame) + ".";
+        }
+
+        TopLayer::DrawGame(currentState, myLocalPlayerId, overlay);
     }
 
     CloseWindow();

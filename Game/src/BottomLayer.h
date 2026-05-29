@@ -5,52 +5,52 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-
-// Note: If using Raylib, include it here or map its keycodes.
-// #include "raylib.h" 
+#include <condition_variable>
+#include <atomic>
+#include <cstdint>
 
 class BottomLayer {
 public:
     BottomLayer();
     ~BottomLayer();
 
-    // --- 1. NETWORKING INTERFACE ---
-    // Start listening for connections (Host)
     bool HostGame(int port);
-    // Connect to a host via Virtual IP (Join)
     bool ConnectToGame(const std::string& virtualIp, int port);
 
-    // --- 2. DATA INTERFACE (For the Middle Layer) ---
-    // Accept data from middle layer to send over TCP
+    // Host: broadcasts to all connected clients.
+    // Client: sends to the host.
     void SendNetworkData(const std::string& payload);
-    // Middle layer calls this every frame to process new network events
+
     bool HasIncomingData();
     std::string GetNextNetworkMessage();
 
-    // --- 3. INPUT INJECTION & TESTING ---
-    // Automated testing scripts call these
     void InjectKeyDown(int keycode);
     void InjectKeyUp(int keycode);
-
-    // Middle layer calls this instead of Raylib's IsKeyDown()
     bool IsActionPressed(int keycode);
 
 private:
-    // Network state
-    bool isRunning;
     bool isHost;
+    std::atomic<bool> isRunning;
 
-    uintptr_t activeSocket = 0;
+    uintptr_t listenSocket = 0;
+    uintptr_t activeSocket = 0; // Client's connection to host.
 
-    // Thread-safe message queue for the game loop
+    std::mutex socketMutex;
+    std::vector<uintptr_t> clientSockets;
+
     std::queue<std::string> incomingDataQueue;
     std::mutex queueMutex;
     std::condition_variable cv;
 
-    // Background thread so TCP waiting doesn't freeze the game
-    std::thread networkThread;  
-    void NetworkWorkerLoop();
+    std::thread acceptThread;
+    std::vector<std::thread> clientThreads;
+    std::thread networkThread;
 
-    // Input state
     std::unordered_map<int, bool> injectedKeyStates;
+
+    void AcceptLoop(uintptr_t listenSock);
+    void ClientReadLoop(uintptr_t socketHandle, bool relayToClients);
+    void PushIncoming(const std::string& payload);
+    void SendFramed(uintptr_t socketHandle, const std::string& payload);
+    void BroadcastFramed(const std::string& payload, uintptr_t exceptSocket = 0);
 };

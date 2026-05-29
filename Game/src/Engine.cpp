@@ -208,7 +208,7 @@ void RollbackAndReplay(uint32_t rollbackStartFrame, uint32_t currentFrame, GameS
 
     currentState = stateHistory[rollbackStartFrame % INPUT_BUFFER_SIZE];
 
-    for (uint32_t frame = rollbackStartFrame; frame < currentFrame; ++frame) {
+    for (uint32_t frame = rollbackStartFrame; frame <= currentFrame; ++frame) {
         currentState.frameNumber = frame;
         ClientInputPacket frameInputs[MAX_PLAYERS] = {};
         BuildFrameInputs(currentState, frame, frameInputs);

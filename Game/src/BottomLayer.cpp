@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <utility>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -27,16 +28,26 @@ bool RecvExact(SOCKET socketHandle, char* dst, int byteCount) {
 
 BottomLayer::BottomLayer()
     : isRunning(false), isHost(false), hasAssignment(false), gameStarted(false),
-      localPlayerId(UINT32_MAX), localPeerPort(0) {
+      localPlayerId(UINT32_MAX), localPeerPort(0),
+      outboundDelayRng(std::random_device{}()), outboundDelayEnabled(false),
+      outboundDelayMinMs(0), outboundDelayMaxMs(0), outboundSenderStop(false) {
     WSADATA wsaData;
     const int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (result != 0) {
         std::cout << "WSAStartup failed: " << result << "\n";
     }
+
+    // Dedicated delayed-send worker. This makes artificial outbound delay
+    // independent of the render/simulation loop, so a rollback freeze does not
+    // accidentally stretch the delay far beyond the chosen range.
+    outboundSenderThread = std::thread(&BottomLayer::OutboundSenderLoop, this);
 }
 
 BottomLayer::~BottomLayer() {
     isRunning = false;
+    outboundSenderStop = true;
+    outboundDelayCv.notify_all();
+    if (outboundSenderThread.joinable()) outboundSenderThread.join();
 
     auto closeIfValid = [](uintptr_t& s) {
         if (s != 0) {
@@ -473,7 +484,135 @@ void BottomLayer::SendNetworkData(const std::string& payload) {
     BroadcastToPeers(payload);
 }
 
+void BottomLayer::SetOutboundDelayRange(int minDelayMs, int maxDelayMs) {
+    if (minDelayMs < 0) minDelayMs = 0;
+    if (maxDelayMs < 0) maxDelayMs = 0;
+    if (minDelayMs > maxDelayMs) std::swap(minDelayMs, maxDelayMs);
+
+    outboundDelayMinMs = minDelayMs;
+    outboundDelayMaxMs = maxDelayMs;
+    outboundDelayEnabled = (maxDelayMs > 0);
+}
+
+void BottomLayer::ClearOutboundDelay() {
+    outboundDelayEnabled = false;
+    outboundDelayMinMs = 0;
+    outboundDelayMaxMs = 0;
+
+    std::lock_guard<std::mutex> lock(outboundDelayMutex);
+    outboundDelayQueue.clear();
+    outboundDelayCv.notify_all();
+}
+
+bool BottomLayer::IsOutboundDelayEnabled() const { return outboundDelayEnabled; }
+int BottomLayer::GetOutboundDelayMinMs() const { return outboundDelayMinMs; }
+int BottomLayer::GetOutboundDelayMaxMs() const { return outboundDelayMaxMs; }
+
+int BottomLayer::ComputeOutboundDelayMs() {
+    const int minDelay = outboundDelayMinMs.load();
+    const int maxDelay = outboundDelayMaxMs.load();
+    if (maxDelay <= 0) return 0;
+    if (minDelay >= maxDelay) return maxDelay;
+
+    std::uniform_int_distribution<int> distribution(minDelay, maxDelay);
+    return distribution(outboundDelayRng);
+}
+
+void BottomLayer::QueueDelayedOutbound(uint32_t targetPlayerId, const std::string& payload) {
+    if (payload.empty()) return;
+
+    DelayedOutboundPacket packet;
+    packet.targetPlayerId = targetPlayerId;
+    packet.payload = payload;
+
+    {
+        std::lock_guard<std::mutex> lock(outboundDelayMutex);
+        packet.sendTime = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(ComputeOutboundDelayMs());
+        outboundDelayQueue.push_back(std::move(packet));
+    }
+
+    outboundDelayCv.notify_one();
+}
+
+void BottomLayer::FlushDelayedOutboundPackets() {
+    // Kept for compatibility with older Game.cpp patches. A dedicated sender
+    // thread now performs timed flushing. This method only wakes the sender so
+    // packets that are already due can be released promptly.
+    outboundDelayCv.notify_one();
+}
+
+void BottomLayer::OutboundSenderLoop() {
+    while (!outboundSenderStop.load()) {
+        std::deque<DelayedOutboundPacket> readyPackets;
+
+        {
+            std::unique_lock<std::mutex> lock(outboundDelayMutex);
+
+            if (outboundDelayQueue.empty()) {
+                outboundDelayCv.wait(lock, [this] {
+                    return outboundSenderStop.load() || !outboundDelayQueue.empty();
+                });
+            } else {
+                auto nextIt = std::min_element(
+                    outboundDelayQueue.begin(),
+                    outboundDelayQueue.end(),
+                    [](const DelayedOutboundPacket& a, const DelayedOutboundPacket& b) {
+                        return a.sendTime < b.sendTime;
+                    }
+                );
+
+                if (nextIt != outboundDelayQueue.end()) {
+                    outboundDelayCv.wait_until(lock, nextIt->sendTime, [this] {
+                        return outboundSenderStop.load();
+                    });
+                }
+            }
+
+            if (outboundSenderStop.load()) break;
+
+            const auto now = std::chrono::steady_clock::now();
+            auto it = outboundDelayQueue.begin();
+            while (it != outboundDelayQueue.end()) {
+                if (it->sendTime <= now) {
+                    readyPackets.push_back(std::move(*it));
+                    it = outboundDelayQueue.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        for (const DelayedOutboundPacket& packet : readyPackets) {
+            SendToPeerImmediate(packet.targetPlayerId, packet.payload);
+        }
+    }
+}
+
 void BottomLayer::BroadcastToPeers(const std::string& payload) {
+    if (payload.empty()) return;
+
+    if (outboundDelayEnabled) {
+        // Snapshot the current peer IDs now. A peer that connects later should
+        // not receive old delayed input packets from before it was connected.
+        std::vector<uint32_t> peerIds;
+        {
+            std::lock_guard<std::mutex> lock(peerSocketMutex);
+            for (const auto& kv : peerSockets) {
+                if (kv.second != 0) peerIds.push_back(kv.first);
+            }
+        }
+
+        for (uint32_t peerId : peerIds) {
+            QueueDelayedOutbound(peerId, payload);
+        }
+        return;
+    }
+
+    BroadcastToPeersImmediate(payload);
+}
+
+void BottomLayer::BroadcastToPeersImmediate(const std::string& payload) {
     if (payload.empty()) return;
 
     std::vector<uintptr_t> sockets;
@@ -490,6 +629,17 @@ void BottomLayer::BroadcastToPeers(const std::string& payload) {
 }
 
 void BottomLayer::SendToPeer(uint32_t peerId, const std::string& payload) {
+    if (payload.empty()) return;
+
+    if (outboundDelayEnabled) {
+        QueueDelayedOutbound(peerId, payload);
+        return;
+    }
+
+    SendToPeerImmediate(peerId, payload);
+}
+
+void BottomLayer::SendToPeerImmediate(uint32_t peerId, const std::string& payload) {
     uintptr_t socketHandle = 0;
     {
         std::lock_guard<std::mutex> lock(peerSocketMutex);

@@ -204,8 +204,11 @@ bool ShouldFreezeForMissingInput(const GameStatePacket& state, uint32_t myLocalP
 
 void RollbackAndReplay(uint32_t rollbackStartFrame, uint32_t currentFrame, GameStatePacket& currentState) {
     if (rollbackStartFrame + MAX_ROLLBACK_FRAMES < currentFrame) return;
-    if (rollbackStartFrame >= currentFrame) return;
+    if (rollbackStartFrame > currentFrame) return;
 
+    // stateHistory[F] stores the state BEFORE simulating frame F.
+    // After normal execution currentState contains the state AFTER currentFrame.
+    // Therefore replay must include currentFrame, not stop at currentFrame - 1.
     currentState = stateHistory[rollbackStartFrame % INPUT_BUFFER_SIZE];
 
     for (uint32_t frame = rollbackStartFrame; frame <= currentFrame; ++frame) {

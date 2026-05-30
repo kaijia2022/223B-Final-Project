@@ -5,7 +5,7 @@
 #include "BottomLayer.h"
 #include <string>
 
-
+namespace {
 ClientInputPacket BuildLocalInput(uint32_t myLocalPlayerId, uint32_t frame) {
     ClientInputPacket localInput = {};
     localInput.type = PacketType::CLIENT_INPUT;
@@ -41,7 +41,7 @@ void ProcessGameplayPacket(const std::string& msg, uint32_t myLocalPlayerId, uin
         }
     }
 }
-
+}
 
 int main() {
     InitWindow(800, 600, "Gold Rush - P2P Rollback Multiplayer Test");
@@ -106,7 +106,24 @@ int main() {
     ResetRollbackBuffers();
     stateHistory[0] = currentState;
 
+    bool outboundDelayTestEnabled = false;
+    constexpr int OUTBOUND_DELAY_MIN_MS = 150;
+    constexpr int OUTBOUND_DELAY_MAX_MS = 450;
+
     while (!WindowShouldClose()) {
+        // Flush delayed packets first so queued input is released even while
+        // this client is frozen by the rollback window.
+        bottomLayer.FlushDelayedOutboundPackets();
+
+        if (IsKeyPressed(KEY_F1)) {
+            outboundDelayTestEnabled = !outboundDelayTestEnabled;
+            if (outboundDelayTestEnabled) {
+                bottomLayer.SetOutboundDelayRange(OUTBOUND_DELAY_MIN_MS, OUTBOUND_DELAY_MAX_MS);
+            } else {
+                bottomLayer.ClearOutboundDelay();
+            }
+        }
+
         while (bottomLayer.HasIncomingData()) {
             std::string msg = bottomLayer.GetNextNetworkMessage();
             ProcessGameplayPacket(msg, myLocalPlayerId, currentState.frameNumber);
@@ -163,6 +180,16 @@ int main() {
         if (freezeForInput) {
             overlay = "Rollback window full: waiting for P" + std::to_string(missingPlayerId) +
                 " input for frame " + std::to_string(missingFrame) + ".";
+        }
+
+        if (bottomLayer.IsOutboundDelayEnabled()) {
+            if (!overlay.empty()) overlay += "  |  ";
+            overlay += "F1 outbound delay ON: random " +
+                std::to_string(bottomLayer.GetOutboundDelayMinMs()) + "-" +
+                std::to_string(bottomLayer.GetOutboundDelayMaxMs()) + " ms";
+        } else {
+            if (!overlay.empty()) overlay += "  |  ";
+            overlay += "F1: toggle outbound delay test";
         }
 
         TopLayer::DrawGame(currentState, myLocalPlayerId, overlay);

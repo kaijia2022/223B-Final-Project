@@ -499,8 +499,15 @@ void BottomLayer::ClearOutboundDelay() {
     outboundDelayMinMs = 0;
     outboundDelayMaxMs = 0;
 
-    std::lock_guard<std::mutex> lock(outboundDelayMutex);
-    outboundDelayQueue.clear();
+    {
+        std::lock_guard<std::mutex> lock(outboundDelayMutex);
+        const auto now = std::chrono::steady_clock::now();
+
+        for (auto& packet : outboundDelayQueue) {
+            packet.sendTime = now;
+        }
+    }
+
     outboundDelayCv.notify_all();
 }
 

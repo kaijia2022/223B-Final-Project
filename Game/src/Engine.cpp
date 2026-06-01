@@ -1,5 +1,6 @@
 #include "Engine.h"
 #include <cstring>
+#include <cstdint>
 
 ClientInputPacket inputHistory[MAX_PLAYERS][INPUT_BUFFER_SIZE] = {};
 bool hasInput[MAX_PLAYERS][INPUT_BUFFER_SIZE] = {};
@@ -46,6 +47,7 @@ void InitializeGameState(GameStatePacket& state, uint32_t activePlayerMask) {
         if (i < 5) {
             state.coins[i].x = coinX[i];
             state.coins[i].y = coinY[i];
+            state.coins[i].collect_count = 0;
             state.coins[i].active = true;
         } else {
             state.coins[i].active = false;
@@ -60,6 +62,42 @@ void ResetRollbackBuffers() {
     std::memset(stateHistory, 0, sizeof(stateHistory));
     needsRollback = false;
     rollbackFrame = 0;
+}
+
+uint32_t hash32(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352d;
+    x ^= x >> 15;
+    x *= 0x846ca68b;
+    x ^= x >> 16;
+    return x;
+}
+
+float RandomPositionX(
+    uint32_t objectIndex,
+    uint32_t eventNumber)
+{
+    uint32_t seed =
+        hash32(objectIndex ^
+            eventNumber);
+
+    float t = seed / 4294967295.0f;
+
+    return 66.0f + t * (734.0f - 66.0f);
+}
+
+float RandomPositionY(uint32_t objectIndex,
+    uint32_t eventNumber)
+{
+    uint32_t seed =
+        hash32(objectIndex ^
+            eventNumber ^
+            0x9e3779b9);
+
+    float t = seed / 4294967295.0f;
+
+    return 66.0f + t * (484.0f - 66.0f);
 }
 
 void SimulateFrame(GameStatePacket& state, const ClientInputPacket inputs[MAX_PLAYERS]) {
@@ -81,7 +119,12 @@ void SimulateFrame(GameStatePacket& state, const ClientInputPacket inputs[MAX_PL
             if (!state.coins[c].active) continue;
             if (CheckPlayerCoinCollision(p.x, p.y, state.coins[c].x, state.coins[c].y)) {
                 p.score += 10;
-                state.coins[c].active = false;
+
+                //re-locate coin
+                //state.coins[c].active = false;
+                int count = state.coins[c].collect_count++; //post-increment, so read value then increment
+                state.coins[c].x = RandomPositionX(c, count);
+                state.coins[c].y = RandomPositionY(c, count);
             }
         }
     }

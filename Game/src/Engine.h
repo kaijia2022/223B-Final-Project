@@ -34,6 +34,7 @@ struct CoinState {
     uint32_t id;
     float x;
     float y;
+    uint32_t collect_count;
     bool active;
 };
 

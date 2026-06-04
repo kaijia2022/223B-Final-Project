@@ -6,7 +6,8 @@
 
 enum class PacketType : uint8_t {
     CLIENT_INPUT = 1,
-    GAME_STATE = 2
+    GAME_STATE = 2,
+    ASSIGN_PLAYER_ID = 3
 };
 
 // Fixed limits keep memory footprint static and safe for raw casting
@@ -45,6 +46,13 @@ struct ClientInputPacket {
     uint32_t playerId;
     float moveX; // -1.0 (Left) to 1.0 (Right)
     float moveY; // -1.0 (Up) to 1.0 (Down)
+};
+
+// SERVER -> CLIENT: sent once after a client connects so each client
+// controls a unique player slot.
+struct AssignPlayerIdPacket {
+    PacketType type = PacketType::ASSIGN_PLAYER_ID;
+    uint32_t playerId;
 };
 
 #pragma pack(pop)

@@ -4,6 +4,7 @@
 #include "TopLayer.h"
 #include "BottomLayer.h"
 #include <string>
+#include <cstring>
 
 bool CheckPlayerCoinCollision(float px, float py, float cx, float cy) {
     float distanceSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
@@ -34,10 +35,11 @@ int main() {
 
     // HOST ONLY: Initialize World Data
     if (role == NetworkRole::HOST) {
+        // Initialize all supported player slots. Host is P0; clients are P1-P3.
         authoritativeState.players[0] = { 0, 200.0f, 250.0f, 0, 0, true }; // Host (Red)
-        authoritativeState.players[1] = { 1, 600.0f, 250.0f, 0, 1, true }; // Client (Blue)
-
-        for (int i = 2; i < MAX_PLAYERS; i++) authoritativeState.players[i].active = false;
+        authoritativeState.players[1] = { 1, 600.0f, 250.0f, 0, 1, false }; // Client 1 (Blue)
+        authoritativeState.players[2] = { 2, 200.0f, 400.0f, 0, 2, false }; // Client 2 (Green)
+        authoritativeState.players[3] = { 3, 600.0f, 400.0f, 0, 3, false }; // Client 3 (Orange)
 
         float mockCoinPositionsX[5] = { 150, 300, 600, 200, 550 };
         float mockCoinPositionsY[5] = { 120, 400, 200, 350, 420 };
@@ -80,13 +82,23 @@ int main() {
                 // Parse potentially merged TCP packets
                 while (offset < msg.size()) {
                     PacketType type = static_cast<PacketType>(msg[offset]);
-                    if (type == PacketType::CLIENT_INPUT && offset + sizeof(ClientInputPacket) <= msg.size()) {
+                    if (type == PacketType::ASSIGN_PLAYER_ID && offset + sizeof(AssignPlayerIdPacket) <= msg.size()) {
+                        AssignPlayerIdPacket assignPacket;
+                        memcpy(&assignPacket, msg.data() + offset, sizeof(AssignPlayerIdPacket));
+                        if (assignPacket.playerId < MAX_PLAYERS) {
+                            authoritativeState.players[assignPacket.playerId].active = true;
+                        }
+                        offset += sizeof(AssignPlayerIdPacket);
+                    }
+                    else if (type == PacketType::CLIENT_INPUT && offset + sizeof(ClientInputPacket) <= msg.size()) {
                         ClientInputPacket clientInput;
                         memcpy(&clientInput, msg.data() + offset, sizeof(ClientInputPacket));
 
                         // Apply client movement
-                        authoritativeState.players[clientInput.playerId].x += clientInput.moveX * moveSpeed;
-                        authoritativeState.players[clientInput.playerId].y += clientInput.moveY * moveSpeed;
+                        if (clientInput.playerId < MAX_PLAYERS && authoritativeState.players[clientInput.playerId].active) {
+                            authoritativeState.players[clientInput.playerId].x += clientInput.moveX * moveSpeed;
+                            authoritativeState.players[clientInput.playerId].y += clientInput.moveY * moveSpeed;
+                        }
 
                         offset += sizeof(ClientInputPacket);
                     }
@@ -97,8 +109,9 @@ int main() {
             }
 
             // Boundary Checks & Collision for ALL players
-            for (int pId = 0; pId < 2; pId++) {
+            for (int pId = 0; pId < MAX_PLAYERS; pId++) {
                 PlayerState& p = authoritativeState.players[pId];
+                if (!p.active) continue;
                 if (p.x < 65.0f) p.x = 65.0f;  if (p.x > 735.0f) p.x = 735.0f;
                 if (p.y < 65.0f) p.y = 65.0f;  if (p.y > 485.0f) p.y = 485.0f;
 
@@ -135,7 +148,15 @@ int main() {
 
                 while (offset < msg.size()) {
                     PacketType type = static_cast<PacketType>(msg[offset]);
-                    if (type == PacketType::GAME_STATE && offset + sizeof(GameStatePacket) <= msg.size()) {
+                    if (type == PacketType::ASSIGN_PLAYER_ID && offset + sizeof(AssignPlayerIdPacket) <= msg.size()) {
+                        AssignPlayerIdPacket assignPacket;
+                        memcpy(&assignPacket, msg.data() + offset, sizeof(AssignPlayerIdPacket));
+                        if (assignPacket.playerId < MAX_PLAYERS) {
+                            myLocalPlayerId = assignPacket.playerId;
+                        }
+                        offset += sizeof(AssignPlayerIdPacket);
+                    }
+                    else if (type == PacketType::GAME_STATE && offset + sizeof(GameStatePacket) <= msg.size()) {
                         memcpy(&authoritativeState, msg.data() + offset, sizeof(GameStatePacket));
                         offset += sizeof(GameStatePacket);
                     }

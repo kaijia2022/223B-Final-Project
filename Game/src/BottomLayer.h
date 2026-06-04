@@ -5,6 +5,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <cstdint>
 
 // Note: If using Raylib, include it here or map its keycodes.
 // #include "raylib.h" 
@@ -41,14 +42,22 @@ private:
     bool isHost;
 
     uintptr_t activeSocket = 0;
+    uintptr_t listenSocketHandle = 0;
+
+    // Host-side client sockets. The vector index is not the player id;
+    // player ids are assigned as clients connect.
+    std::vector<uintptr_t> clientSockets;
+    std::vector<std::thread> clientThreads;
+    std::mutex socketMutex;
 
     // Thread-safe message queue for the game loop
     std::queue<std::string> incomingDataQueue;
     std::mutex queueMutex;
 
     // Background thread so TCP waiting doesn't freeze the game
-    std::thread networkThread;  
+    std::thread networkThread;
     void NetworkWorkerLoop();
+    void ClientReceiveLoop(uintptr_t socketHandle, uint32_t assignedPlayerId);
 
     // Input state
     std::unordered_map<int, bool> injectedKeyStates;

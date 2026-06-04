@@ -4,14 +4,52 @@
 #include "TopLayer.h"
 #include "BottomLayer.h"
 #include <string>
+#include <cstring>
 
 bool CheckPlayerCoinCollision(float px, float py, float cx, float cy) {
     float distanceSq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
     return distanceSq < 625.0f;
 }
 
+static void InitializeWorld(GameStatePacket& state) {
+    state = {};
+    state.type = PacketType::GAME_STATE;
+    state.frameNumber = 0;
+
+    const float spawnX[MAX_PLAYERS] = { 200.0f, 600.0f, 200.0f, 600.0f };
+    const float spawnY[MAX_PLAYERS] = { 250.0f, 250.0f, 420.0f, 420.0f };
+
+    for (uint32_t i = 0; i < MAX_PLAYERS; ++i) {
+        state.players[i] = { i, spawnX[i], spawnY[i], 0, static_cast<uint8_t>(i), false };
+    }
+    state.players[0].active = true; // Host/local player.
+
+    float mockCoinPositionsX[5] = { 150, 300, 600, 200, 550 };
+    float mockCoinPositionsY[5] = { 120, 400, 200, 350, 420 };
+    for (int i = 0; i < MAX_COINS; i++) {
+        if (i < 5) {
+            state.coins[i] = { (uint32_t)i, mockCoinPositionsX[i], mockCoinPositionsY[i], true };
+        }
+        else {
+            state.coins[i] = { (uint32_t)i, 0.0f, 0.0f, false };
+        }
+    }
+}
+
+static void ApplyMovement(PlayerState& player, const ClientInputPacket& input, float moveSpeed) {
+    player.x += input.moveX * moveSpeed;
+    player.y += input.moveY * moveSpeed;
+}
+
+static void ClampPlayerToArena(PlayerState& player) {
+    if (player.x < 65.0f) player.x = 65.0f;
+    if (player.x > 735.0f) player.x = 735.0f;
+    if (player.y < 65.0f) player.y = 65.0f;
+    if (player.y > 485.0f) player.y = 485.0f;
+}
+
 int main() {
-    InitWindow(800, 600, "Gold Rush - Multiplayer Ready");
+    InitWindow(800, 600, "Gold Rush - 4 Player Multiplayer");
     SetTargetFPS(60);
 
     std::string targetIp = "";
@@ -24,31 +62,27 @@ int main() {
     }
 
     BottomLayer bottomLayer;
-    uint32_t myLocalPlayerId = (role == NetworkRole::HOST) ? 0 : 1;
+    bool connected = false;
 
-    if (role == NetworkRole::HOST) bottomLayer.HostGame(8080);
-    else bottomLayer.ConnectToGame(targetIp, 8080);
+    if (role == NetworkRole::HOST) {
+        connected = bottomLayer.HostGame(8080);
+    }
+    else {
+        connected = bottomLayer.ConnectToGame(targetIp, 8080);
+    }
+
+    if (!connected) {
+        CloseWindow();
+        return 1;
+    }
+
+    uint32_t myLocalPlayerId = bottomLayer.GetLocalPlayerId();
 
     GameStatePacket authoritativeState = {};
-    authoritativeState.frameNumber = 0;
 
     // HOST ONLY: Initialize World Data
     if (role == NetworkRole::HOST) {
-        authoritativeState.players[0] = { 0, 200.0f, 250.0f, 0, 0, true }; // Host (Red)
-        authoritativeState.players[1] = { 1, 600.0f, 250.0f, 0, 1, true }; // Client (Blue)
-
-        for (int i = 2; i < MAX_PLAYERS; i++) authoritativeState.players[i].active = false;
-
-        float mockCoinPositionsX[5] = { 150, 300, 600, 200, 550 };
-        float mockCoinPositionsY[5] = { 120, 400, 200, 350, 420 };
-        for (int i = 0; i < MAX_COINS; i++) {
-            if (i < 5) {
-                authoritativeState.coins[i] = { (uint32_t)i, mockCoinPositionsX[i], mockCoinPositionsY[i], true };
-            }
-            else {
-                authoritativeState.coins[i].active = false;
-            }
-        }
+        InitializeWorld(authoritativeState);
     }
 
     // MAIN GAME LOOP
@@ -68,25 +102,30 @@ int main() {
         if (role == NetworkRole::HOST) {
             authoritativeState.frameNumber++;
 
-            // Apply Host's local input immediately
-            authoritativeState.players[0].x += localInput.moveX * moveSpeed;
-            authoritativeState.players[0].y += localInput.moveY * moveSpeed;
+            // Activate/deactivate slots based on live connections. The host is always player 0.
+            for (uint32_t i = 0; i < MAX_PLAYERS; ++i) {
+                authoritativeState.players[i].active = bottomLayer.IsPlayerConnected(i);
+            }
 
-            // Process Client Inputs from Network Queue
+            // Apply Host's local input immediately.
+            ApplyMovement(authoritativeState.players[0], localInput, moveSpeed);
+
+            // Process Client Inputs from Network Queue.
             while (bottomLayer.HasIncomingData()) {
                 std::string msg = bottomLayer.GetNextNetworkMessage();
                 size_t offset = 0;
 
-                // Parse potentially merged TCP packets
+                // Parse potentially merged TCP packets.
                 while (offset < msg.size()) {
                     PacketType type = static_cast<PacketType>(msg[offset]);
                     if (type == PacketType::CLIENT_INPUT && offset + sizeof(ClientInputPacket) <= msg.size()) {
-                        ClientInputPacket clientInput;
-                        memcpy(&clientInput, msg.data() + offset, sizeof(ClientInputPacket));
+                        ClientInputPacket clientInput{};
+                        std::memcpy(&clientInput, msg.data() + offset, sizeof(ClientInputPacket));
 
-                        // Apply client movement
-                        authoritativeState.players[clientInput.playerId].x += clientInput.moveX * moveSpeed;
-                        authoritativeState.players[clientInput.playerId].y += clientInput.moveY * moveSpeed;
+                        // Apply movement only for valid, connected player slots.
+                        if (clientInput.playerId < MAX_PLAYERS && authoritativeState.players[clientInput.playerId].active) {
+                            ApplyMovement(authoritativeState.players[clientInput.playerId], clientInput, moveSpeed);
+                        }
 
                         offset += sizeof(ClientInputPacket);
                     }
@@ -96,11 +135,12 @@ int main() {
                 }
             }
 
-            // Boundary Checks & Collision for ALL players
-            for (int pId = 0; pId < 2; pId++) {
+            // Boundary Checks & Collision for ALL active players.
+            for (uint32_t pId = 0; pId < MAX_PLAYERS; pId++) {
                 PlayerState& p = authoritativeState.players[pId];
-                if (p.x < 65.0f) p.x = 65.0f;  if (p.x > 735.0f) p.x = 735.0f;
-                if (p.y < 65.0f) p.y = 65.0f;  if (p.y > 485.0f) p.y = 485.0f;
+                if (!p.active) continue;
+
+                ClampPlayerToArena(p);
 
                 for (int cId = 0; cId < MAX_COINS; cId++) {
                     if (authoritativeState.coins[cId].active &&
@@ -115,7 +155,7 @@ int main() {
                 }
             }
 
-            // Broadcast Authoritative State to Client
+            // Broadcast Authoritative State to every connected client.
             std::string outData(reinterpret_cast<char*>(&authoritativeState), sizeof(GameStatePacket));
             bottomLayer.SendNetworkData(outData);
         }
@@ -124,11 +164,11 @@ int main() {
         // CLIENT LOGIC
         // ==========================================================
         else if (role == NetworkRole::CLIENT) {
-            // Send our input to the Host
+            // Send our input to the Host.
             std::string outData(reinterpret_cast<char*>(&localInput), sizeof(ClientInputPacket));
             bottomLayer.SendNetworkData(outData);
 
-            // Overwrite local world with Host's World State
+            // Overwrite local world with Host's World State.
             while (bottomLayer.HasIncomingData()) {
                 std::string msg = bottomLayer.GetNextNetworkMessage();
                 size_t offset = 0;
@@ -136,8 +176,15 @@ int main() {
                 while (offset < msg.size()) {
                     PacketType type = static_cast<PacketType>(msg[offset]);
                     if (type == PacketType::GAME_STATE && offset + sizeof(GameStatePacket) <= msg.size()) {
-                        memcpy(&authoritativeState, msg.data() + offset, sizeof(GameStatePacket));
+                        std::memcpy(&authoritativeState, msg.data() + offset, sizeof(GameStatePacket));
                         offset += sizeof(GameStatePacket);
+                    }
+                    else if (type == PacketType::PLAYER_ASSIGNMENT && offset + sizeof(PlayerAssignmentPacket) <= msg.size()) {
+                        // Normally consumed during ConnectToGame; tolerate it if TCP delivery batches it later.
+                        PlayerAssignmentPacket assignment{};
+                        std::memcpy(&assignment, msg.data() + offset, sizeof(PlayerAssignmentPacket));
+                        myLocalPlayerId = assignment.playerId;
+                        offset += sizeof(PlayerAssignmentPacket);
                     }
                     else {
                         break;

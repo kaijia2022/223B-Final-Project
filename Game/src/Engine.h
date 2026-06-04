@@ -6,7 +6,8 @@
 
 enum class PacketType : uint8_t {
     CLIENT_INPUT = 1,
-    GAME_STATE = 2
+    GAME_STATE = 2,
+    PLAYER_ASSIGNMENT = 3
 };
 
 // Fixed limits keep memory footprint static and safe for raw casting
@@ -29,6 +30,12 @@ struct CoinState {
     float x;
     float y;
     bool active;
+};
+
+// SERVER -> CLIENT: Sent once right after a client connects so each client knows its own slot.
+struct PlayerAssignmentPacket {
+    PacketType type = PacketType::PLAYER_ASSIGNMENT;
+    uint32_t playerId;
 };
 
 // SERVER -> CLIENT: The absolute, authoritative state of the world

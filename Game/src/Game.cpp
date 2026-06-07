@@ -85,8 +85,23 @@ int main() {
         InitializeWorld(authoritativeState);
     }
 
+    bool outboundDelayTestEnabled = false;
+    constexpr int OUTBOUND_DELAY_MIN_MS = 150;
+    constexpr int OUTBOUND_DELAY_MAX_MS = 450;
+
     // MAIN GAME LOOP
     while (!WindowShouldClose()) {
+        bottomLayer.FlushDelayedOutboundPackets();
+
+        if (IsKeyPressed(KEY_F1)) {
+            outboundDelayTestEnabled = !outboundDelayTestEnabled;
+            if (outboundDelayTestEnabled) {
+                bottomLayer.SetOutboundDelayRange(OUTBOUND_DELAY_MIN_MS, OUTBOUND_DELAY_MAX_MS);
+            }
+            else {
+                bottomLayer.ClearOutboundDelay();
+            }
+        }
         float moveSpeed = 4.0f;
 
         // 1. GATHER LOCAL INPUT
@@ -196,7 +211,17 @@ int main() {
         // ==========================================================
         // RENDER (Both Host and Client do this exactly the same way)
         // ==========================================================
-        TopLayer::DrawGame(authoritativeState, myLocalPlayerId);
+        std::string overlay;
+        if (bottomLayer.IsOutboundDelayEnabled()) {
+            overlay = "F1 outbound delay ON: random " +
+                std::to_string(bottomLayer.GetOutboundDelayMinMs()) + "-" +
+                std::to_string(bottomLayer.GetOutboundDelayMaxMs()) + " ms";
+        }
+        else {
+            overlay = "F1: toggle outbound delay test";
+        }
+
+        TopLayer::DrawGame(authoritativeState, myLocalPlayerId, overlay);
     }
 
     CloseWindow();

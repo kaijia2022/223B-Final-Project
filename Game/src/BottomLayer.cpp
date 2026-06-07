@@ -43,7 +43,10 @@ static int PacketSizeFromType(PacketType type) {
     }
 }
 
-BottomLayer::BottomLayer() : isRunning(false), isHost(false), activeSocket(0), listenSocket(0), localPlayerId(0) {
+BottomLayer::BottomLayer()
+    : isRunning(false), isHost(false), activeSocket(0), listenSocket(0), localPlayerId(0),
+      outboundDelayRng(std::random_device{}()), outboundDelayEnabled(false),
+      outboundDelayMinMs(0), outboundDelayMaxMs(0), outboundSenderStop(false) {
     playerSockets.fill(0);
     connectedPlayers.fill(false);
     connectedPlayers[0] = true; // Host/local slot exists by default when hosting.
@@ -51,10 +54,19 @@ BottomLayer::BottomLayer() : isRunning(false), isHost(false), activeSocket(0), l
     // Initialize Winsock
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
+
+    // Dedicated delayed-send worker. This keeps artificial outbound delay
+    // independent of the render/game loop.
+    outboundSenderThread = std::thread(&BottomLayer::OutboundSenderLoop, this);
 }
 
 BottomLayer::~BottomLayer() {
     isRunning = false;
+    outboundSenderStop = true;
+    outboundDelayCv.notify_all();
+    if (outboundSenderThread.joinable()) {
+        outboundSenderThread.join();
+    }
 
     {
         std::lock_guard<std::mutex> lock(socketMutex);
@@ -245,19 +257,162 @@ void BottomLayer::SendNetworkData(const std::string& payload) {
         }
 
         for (const auto& entry : socketsToSend) {
-            if (!SendAll((SOCKET)entry.second, payload.data(), (int)payload.size())) {
-                std::cout << "Failed to send data to Player " << entry.first << ".\n";
-                MarkPlayerDisconnected(entry.first, entry.second);
+            if (outboundDelayEnabled) {
+                QueueDelayedOutbound(entry.first, entry.second, payload);
+            }
+            else {
+                SendPayloadImmediate(entry.first, entry.second, payload);
             }
         }
     }
     else if (activeSocket != 0) {
         uintptr_t sock = activeSocket;
-        if (!SendAll((SOCKET)sock, payload.data(), (int)payload.size())) {
-            std::cout << "Failed to send data to host.\n";
-            MarkPlayerDisconnected(localPlayerId, sock);
+        if (outboundDelayEnabled) {
+            QueueDelayedOutbound(0, sock, payload);
+        }
+        else {
+            SendPayloadImmediate(localPlayerId, sock, payload);
         }
     }
+}
+
+void BottomLayer::SetOutboundDelayRange(int minDelayMs, int maxDelayMs) {
+    if (minDelayMs < 0) minDelayMs = 0;
+    if (maxDelayMs < 0) maxDelayMs = 0;
+    if (minDelayMs > maxDelayMs) std::swap(minDelayMs, maxDelayMs);
+
+    outboundDelayMinMs = minDelayMs;
+    outboundDelayMaxMs = maxDelayMs;
+    outboundDelayEnabled = (maxDelayMs > 0);
+}
+
+void BottomLayer::ClearOutboundDelay() {
+    outboundDelayEnabled = false;
+    outboundDelayMinMs = 0;
+    outboundDelayMaxMs = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(outboundDelayMutex);
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& packet : outboundDelayQueue) {
+            packet.sendTime = now;
+        }
+    }
+
+    outboundDelayCv.notify_all();
+}
+
+bool BottomLayer::IsOutboundDelayEnabled() const {
+    return outboundDelayEnabled;
+}
+
+int BottomLayer::GetOutboundDelayMinMs() const {
+    return outboundDelayMinMs;
+}
+
+int BottomLayer::GetOutboundDelayMaxMs() const {
+    return outboundDelayMaxMs;
+}
+
+void BottomLayer::FlushDelayedOutboundPackets() {
+    // The dedicated sender thread performs timed flushing. This only wakes it
+    // so packets that are already due can be released promptly.
+    outboundDelayCv.notify_one();
+}
+
+int BottomLayer::ComputeOutboundDelayMs() {
+    const int minDelay = outboundDelayMinMs.load();
+    const int maxDelay = outboundDelayMaxMs.load();
+    if (maxDelay <= 0) return 0;
+    if (minDelay >= maxDelay) return maxDelay;
+
+    std::uniform_int_distribution<int> distribution(minDelay, maxDelay);
+    return distribution(outboundDelayRng);
+}
+
+void BottomLayer::QueueDelayedOutbound(uint32_t targetPlayerId, uintptr_t socketHandle, const std::string& payload) {
+    if (payload.empty() || socketHandle == 0) return;
+
+    DelayedOutboundPacket packet;
+    packet.targetPlayerId = targetPlayerId;
+    packet.socketHandle = socketHandle;
+    packet.payload = payload;
+
+    {
+        std::lock_guard<std::mutex> lock(outboundDelayMutex);
+        packet.sendTime = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(ComputeOutboundDelayMs());
+        outboundDelayQueue.push_back(std::move(packet));
+    }
+
+    outboundDelayCv.notify_one();
+}
+
+void BottomLayer::OutboundSenderLoop() {
+    while (!outboundSenderStop.load()) {
+        std::deque<DelayedOutboundPacket> readyPackets;
+
+        {
+            std::unique_lock<std::mutex> lock(outboundDelayMutex);
+
+            if (outboundDelayQueue.empty()) {
+                outboundDelayCv.wait(lock, [this] {
+                    return outboundSenderStop.load() || !outboundDelayQueue.empty();
+                });
+            }
+            else {
+                auto nextIt = std::min_element(
+                    outboundDelayQueue.begin(),
+                    outboundDelayQueue.end(),
+                    [](const DelayedOutboundPacket& a, const DelayedOutboundPacket& b) {
+                        return a.sendTime < b.sendTime;
+                    }
+                );
+
+                if (nextIt != outboundDelayQueue.end()) {
+                    outboundDelayCv.wait_until(lock, nextIt->sendTime, [this] {
+                        return outboundSenderStop.load();
+                    });
+                }
+            }
+
+            if (outboundSenderStop.load()) break;
+
+            const auto now = std::chrono::steady_clock::now();
+            auto it = outboundDelayQueue.begin();
+            while (it != outboundDelayQueue.end()) {
+                if (it->sendTime <= now) {
+                    readyPackets.push_back(std::move(*it));
+                    it = outboundDelayQueue.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        for (const DelayedOutboundPacket& packet : readyPackets) {
+            SendPayloadImmediate(packet.targetPlayerId, packet.socketHandle, packet.payload);
+        }
+    }
+}
+
+bool BottomLayer::SendPayloadImmediate(uint32_t targetPlayerId, uintptr_t socketHandle, const std::string& payload) {
+    if (socketHandle == 0 || payload.empty()) return false;
+
+    if (!SendAll((SOCKET)socketHandle, payload.data(), (int)payload.size())) {
+        if (isHost) {
+            std::cout << "Failed to send data to Player " << targetPlayerId << ".\n";
+            MarkPlayerDisconnected(targetPlayerId, socketHandle);
+        }
+        else {
+            std::cout << "Failed to send data to host.\n";
+            MarkPlayerDisconnected(localPlayerId, socketHandle);
+        }
+        return false;
+    }
+
+    return true;
 }
 
 bool BottomLayer::HasIncomingData() {

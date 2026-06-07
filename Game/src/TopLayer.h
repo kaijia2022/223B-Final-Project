@@ -18,7 +18,7 @@ public:
         }
     }
 
-    static void DrawGame(const GameStatePacket& state, uint32_t localPlayerId) {
+    static void DrawGame(const GameStatePacket& state, uint32_t localPlayerId, const std::string& overlayText = "") {
         BeginDrawing();
         ClearBackground(RAYWHITE);
 
@@ -53,8 +53,12 @@ public:
             }
         }
 
+        if (!overlayText.empty()) {
+            DrawText(overlayText.c_str(), 50, 505, 16, DARKGRAY);
+        }
+
         // 4. Draw Scoreboard UI (Bottom HUD) in a compact 2x2 layout for up to 4 players.
-        DrawText("SCOREBOARD:", 50, 520, 18, DARKGRAY);
+        DrawText("SCOREBOARD:", 50, 530, 18, DARKGRAY);
         for (int i = 0; i < MAX_PLAYERS && i < SUPPORTED_PLAYERS; i++) {
             if (state.players[i].active) {
                 std::string scoreText = "P" + std::to_string(state.players[i].id) + ": " + std::to_string(state.players[i].score);
@@ -63,7 +67,7 @@ public:
                 int col = i % 2;
                 int row = i / 2;
                 int x = 200 + col * 170;
-                int y = 510 + row * 24;
+                int y = 530 + row * 24;
                 DrawText(scoreText.c_str(), x, y, 18, pColor);
             }
         }

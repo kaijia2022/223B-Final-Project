@@ -1,6 +1,8 @@
 #include "BottomLayer.h"
 #include "Engine.h"
+#include <algorithm>
 #include <iostream>
+#include <utility>
 
 // Include Winsock
 #define WIN32_LEAN_AND_MEAN
@@ -9,14 +11,26 @@
 #include <ws2tcpip.h>
 #pragma comment (lib, "Ws2_32.lib")
 
-BottomLayer::BottomLayer() : isRunning(false), isHost(false), activeSocket(0), listenSocketHandle(0) {
+BottomLayer::BottomLayer()
+    : isRunning(false), isHost(false), activeSocket(0), listenSocketHandle(0),
+      outboundDelayRng(std::random_device{}()), outboundDelayEnabled(false),
+      outboundDelayMinMs(0), outboundDelayMaxMs(0), outboundSenderStop(false) {
     // Initialize Winsock
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
+
+    // Dedicated delayed-send worker. This keeps artificial outbound delay
+    // independent of the render/game loop.
+    outboundSenderThread = std::thread(&BottomLayer::OutboundSenderLoop, this);
 }
 
 BottomLayer::~BottomLayer() {
     isRunning = false;
+    outboundSenderStop = true;
+    outboundDelayCv.notify_all();
+    if (outboundSenderThread.joinable()) {
+        outboundSenderThread.join();
+    }
 
     if (listenSocketHandle != 0) {
         closesocket((SOCKET)listenSocketHandle);
@@ -139,14 +153,145 @@ void BottomLayer::SendNetworkData(const std::string& payload) {
         std::lock_guard<std::mutex> lock(socketMutex);
         for (uintptr_t socketHandle : clientSockets) {
             if (socketHandle != 0) {
-                send((SOCKET)socketHandle, payload.data(), (int)payload.size(), 0);
+                if (outboundDelayEnabled) {
+                    QueueDelayedOutbound(socketHandle, payload);
+                }
+                else {
+                    SendImmediate(socketHandle, payload);
+                }
             }
         }
     }
     else if (activeSocket != 0) {
-        // Send the raw binary data over TCP
-        send((SOCKET)activeSocket, payload.data(), (int)payload.size(), 0);
+        if (outboundDelayEnabled) {
+            QueueDelayedOutbound(activeSocket, payload);
+        }
+        else {
+            // Send the raw binary data over TCP
+            SendImmediate(activeSocket, payload);
+        }
     }
+}
+
+
+void BottomLayer::SetOutboundDelayRange(int minDelayMs, int maxDelayMs) {
+    if (minDelayMs < 0) minDelayMs = 0;
+    if (maxDelayMs < 0) maxDelayMs = 0;
+    if (minDelayMs > maxDelayMs) std::swap(minDelayMs, maxDelayMs);
+
+    outboundDelayMinMs = minDelayMs;
+    outboundDelayMaxMs = maxDelayMs;
+    outboundDelayEnabled = (maxDelayMs > 0);
+}
+
+void BottomLayer::ClearOutboundDelay() {
+    outboundDelayEnabled = false;
+    outboundDelayMinMs = 0;
+    outboundDelayMaxMs = 0;
+
+    // Do not drop already queued gameplay packets when disabling delay.
+    // Send them now so F1 only removes artificial latency.
+    std::deque<DelayedOutboundPacket> queuedPackets;
+    {
+        std::lock_guard<std::mutex> lock(outboundDelayMutex);
+        queuedPackets.swap(outboundDelayQueue);
+    }
+
+    for (const DelayedOutboundPacket& packet : queuedPackets) {
+        SendImmediate(packet.socketHandle, packet.payload);
+    }
+
+    outboundDelayCv.notify_all();
+}
+
+bool BottomLayer::IsOutboundDelayEnabled() const { return outboundDelayEnabled; }
+int BottomLayer::GetOutboundDelayMinMs() const { return outboundDelayMinMs; }
+int BottomLayer::GetOutboundDelayMaxMs() const { return outboundDelayMaxMs; }
+
+int BottomLayer::ComputeOutboundDelayMs() {
+    const int minDelay = outboundDelayMinMs.load();
+    const int maxDelay = outboundDelayMaxMs.load();
+    if (maxDelay <= 0) return 0;
+    if (minDelay >= maxDelay) return maxDelay;
+
+    std::uniform_int_distribution<int> distribution(minDelay, maxDelay);
+    return distribution(outboundDelayRng);
+}
+
+void BottomLayer::QueueDelayedOutbound(uintptr_t socketHandle, const std::string& payload) {
+    if (socketHandle == 0) return;
+
+    DelayedOutboundPacket packet;
+    packet.socketHandle = socketHandle;
+    packet.payload = payload;
+    packet.sendTime = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(ComputeOutboundDelayMs());
+
+    {
+        std::lock_guard<std::mutex> lock(outboundDelayMutex);
+        outboundDelayQueue.push_back(std::move(packet));
+    }
+    outboundDelayCv.notify_one();
+}
+
+void BottomLayer::FlushDelayedOutboundPackets() {
+    // The background sender owns scheduled sends. This method exists so the
+    // game loop can keep the same interface as the rollback delay-injection build.
+    outboundDelayCv.notify_one();
+}
+
+void BottomLayer::OutboundSenderLoop() {
+    while (!outboundSenderStop) {
+        std::deque<DelayedOutboundPacket> readyPackets;
+
+        {
+            std::unique_lock<std::mutex> lock(outboundDelayMutex);
+
+            if (outboundDelayQueue.empty()) {
+                outboundDelayCv.wait(lock, [this] {
+                    return outboundSenderStop.load() || !outboundDelayQueue.empty();
+                });
+            }
+
+            if (outboundSenderStop) break;
+
+            auto nextIt = std::min_element(
+                outboundDelayQueue.begin(),
+                outboundDelayQueue.end(),
+                [](const DelayedOutboundPacket& a, const DelayedOutboundPacket& b) {
+                    return a.sendTime < b.sendTime;
+                });
+
+            if (nextIt != outboundDelayQueue.end()) {
+                outboundDelayCv.wait_until(lock, nextIt->sendTime, [this] {
+                    return outboundSenderStop.load();
+                });
+            }
+
+            if (outboundSenderStop) break;
+
+            const auto now = std::chrono::steady_clock::now();
+            auto it = outboundDelayQueue.begin();
+            while (it != outboundDelayQueue.end()) {
+                if (it->sendTime <= now) {
+                    readyPackets.push_back(std::move(*it));
+                    it = outboundDelayQueue.erase(it);
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+
+        for (const DelayedOutboundPacket& packet : readyPackets) {
+            SendImmediate(packet.socketHandle, packet.payload);
+        }
+    }
+}
+
+void BottomLayer::SendImmediate(uintptr_t socketHandle, const std::string& payload) {
+    if (socketHandle == 0 || payload.empty()) return;
+    send((SOCKET)socketHandle, payload.data(), (int)payload.size(), 0);
 }
 
 bool BottomLayer::HasIncomingData() {
@@ -215,4 +360,17 @@ void BottomLayer::NetworkWorkerLoop() {
             break;
         }
     }
+}
+
+void BottomLayer::InjectKeyDown(int keycode) {
+    injectedKeyStates[keycode] = true;
+}
+
+void BottomLayer::InjectKeyUp(int keycode) {
+    injectedKeyStates[keycode] = false;
+}
+
+bool BottomLayer::IsActionPressed(int keycode) {
+    auto it = injectedKeyStates.find(keycode);
+    return it != injectedKeyStates.end() && it->second;
 }

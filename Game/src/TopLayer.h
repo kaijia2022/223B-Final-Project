@@ -16,7 +16,7 @@ public:
         }
     }
 
-    static void DrawGame(const GameStatePacket& state, uint32_t localPlayerId) {
+    static void DrawGame(const GameStatePacket& state, uint32_t localPlayerId, const std::string& overlayText = "") {
         BeginDrawing();
         ClearBackground(RAYWHITE);
 
@@ -62,6 +62,10 @@ public:
                 DrawText(scoreText.c_str(), 200 + uiOffset, 520, 18, pColor);
                 uiOffset += 120; // Space out names horizontally
             }
+        }
+
+        if (!overlayText.empty()) {
+            DrawText(overlayText.c_str(), 50, 555, 16, DARKGRAY);
         }
 
         EndDrawing();
